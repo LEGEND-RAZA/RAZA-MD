@@ -1,0 +1,35 @@
+{
+  "name": "Raza-MD",
+  "description": "Raza-MD WhatsApp Bot",
+  "repository": "https://github.com/LEGEND-RAZA/RAZA-MD",
+  "keywords": [
+    "whatsapp",
+    "baileys",
+    "bot",
+    "raza-md",
+    "nodejs"
+  ],
+  "stack": "heroku-24",
+  "buildpacks": [
+    {
+      "url": "heroku/nodejs"
+    }
+  ],
+  "env": {
+    "PAIRING_NUMBER": {
+      "description": "WhatsApp number for pairing code.",
+      "required": true,
+      "value": "923XXXXXXXXX"
+    },
+    "PREFIX": {
+      "description": "Bot command prefix.",
+      "required": false,
+      "value": "."
+    },
+    "OWNER_NUMBER": {
+      "description": "Bot owner WhatsApp number.",
+      "required": false,
+      "value": "923280966780"
+    }
+  }
+}
