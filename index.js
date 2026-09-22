@@ -21,15 +21,20 @@ const ROOT = process.cwd()
 const SESSION_DIR = path.join(ROOT, 'session')
 const PLUGIN_DIR = path.join(ROOT, 'plugins')
 
-const PREFIX = process.env.PREFIX || '!'
+const PREFIX =
+  process.env.PREFIX || '!'
 
-const logger = P({ level: 'silent' })
+const logger =
+  P({ level: 'silent' })
 
 let sock = null
 let starting = false
 let reconnectTimer = null
+let shuttingDown = false
+
+// Pairing is allowed only once during this process.
+// Never request another code after a reconnect.
 let pairingRequested = false
-let stopping = false
 
 const plugins = new Map()
 const messageListeners = []
@@ -50,7 +55,9 @@ function question(text) {
 }
 
 function isSpecialListener(pluginObj) {
-  if (typeof pluginObj?.command !== 'string') {
+  if (
+    typeof pluginObj?.command !== 'string'
+  ) {
     return false
   }
 
@@ -60,12 +67,19 @@ function isSpecialListener(pluginObj) {
   )
 }
 
-async function registerPluginObject(pluginObj, file) {
-  if (!pluginObj || typeof pluginObj !== 'object') {
+async function registerPluginObject(
+  pluginObj,
+  file
+) {
+  if (
+    !pluginObj ||
+    typeof pluginObj !== 'object'
+  ) {
     return
   }
 
-  const specialListener = isSpecialListener(pluginObj)
+  const specialListener =
+    isSpecialListener(pluginObj)
 
   const isGroupListener =
     pluginObj.command === '__welcome_listener' ||
@@ -94,7 +108,10 @@ async function registerPluginObject(pluginObj, file) {
     pluginObj.on === 'text' ||
     typeof pluginObj.on === 'function'
 
-  if (isMessageListener && !isGroupListener) {
+  if (
+    isMessageListener &&
+    !isGroupListener
+  ) {
     if (!messageListeners.includes(pluginObj)) {
       messageListeners.push(pluginObj)
 
@@ -104,7 +121,10 @@ async function registerPluginObject(pluginObj, file) {
     }
   }
 
-  if (pluginObj.command && !specialListener) {
+  if (
+    pluginObj.command &&
+    !specialListener
+  ) {
     const commandNames =
       Array.isArray(pluginObj.command)
         ? pluginObj.command
@@ -137,17 +157,23 @@ async function loadPlugins() {
 
   const entries =
     fs.readdirSync(PLUGIN_DIR)
-      .filter(file => file.endsWith('.js'))
+      .filter(file =>
+        file.endsWith('.js')
+      )
 
   for (const file of entries) {
     try {
       const filePath =
-        path.join(PLUGIN_DIR, file)
+        path.join(
+          PLUGIN_DIR,
+          file
+        )
 
       const url =
         `${pathToFileURL(filePath).href}?v=${Date.now()}`
 
-      const mod = await import(url)
+      const mod =
+        await import(url)
 
       const exports = [
         mod.default,
@@ -157,7 +183,10 @@ async function loadPlugins() {
       const processed = new Set()
 
       for (const item of exports) {
-        if (!item || processed.has(item)) {
+        if (
+          !item ||
+          processed.has(item)
+        ) {
           continue
         }
 
@@ -206,7 +235,11 @@ async function getPairingNumber() {
     )
 
     console.error(
-      '[!] Set PAIRING_NUMBER in Heroku Config Vars.'
+      '[!] Add PAIRING_NUMBER in Config Vars.'
+    )
+
+    console.error(
+      '[!] Example: PAIRING_NUMBER=923XXXXXXXXX\n'
     )
 
     return ''
@@ -221,7 +254,23 @@ async function getPairingNumber() {
 }
 
 async function requestPairingCode() {
+
+  // Never request a second code during this process.
   if (pairingRequested) {
+    return
+  }
+
+  // Socket must exist.
+  if (!sock) {
+    return
+  }
+
+  // Check the CURRENT auth state again.
+  if (sock.authState?.creds?.registered) {
+    console.log(
+      '[OK] Existing WhatsApp session found. Pairing code not required.'
+    )
+
     return
   }
 
@@ -230,27 +279,54 @@ async function requestPairingCode() {
   const number =
     await getPairingNumber()
 
-  if (!number || number.length < 7) {
+  if (
+    !number ||
+    number.length < 7
+  ) {
     console.error(
       '[-] Invalid pairing number.'
     )
 
-    pairingRequested = false
     return
   }
 
+  console.log(
+    '\n=================================='
+  )
+
+  console.log(
+    '       RAZA-MD PAIRING CODE'
+  )
+
+  console.log(
+    `       Pairing Number: ${number}`
+  )
+
+  console.log(
+    '=================================='
+  )
+
   try {
+
     await new Promise(resolve =>
       setTimeout(resolve, 3000)
     )
 
-    if (!sock) {
-      pairingRequested = false
+    // Check again after the delay.
+    if (
+      sock.authState?.creds?.registered
+    ) {
+      console.log(
+        '[OK] Session became registered. Skipping pairing code.'
+      )
+
       return
     }
 
     const pairingCode =
-      await sock.requestPairingCode(number)
+      await sock.requestPairingCode(
+        number
+      )
 
     const formattedCode =
       pairingCode
@@ -274,63 +350,112 @@ async function requestPairingCode() {
       '==================================\n'
     )
 
+    console.log(
+      '[!] Use this code to link Raza-MD.'
+    )
+
+    console.log(
+      '[!] No new pairing code will be requested during this process.'
+    )
+
   } catch (error) {
-    pairingRequested = false
 
     console.error(
       '[-] Pairing code request failed:',
       error?.message || error
     )
-  }
-}
 
-function clearReconnectTimer() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer)
-    reconnectTimer = null
+    // Keep pairingRequested true.
+    // This prevents automatic code spam.
   }
 }
 
 function scheduleReconnect() {
-  if (stopping || reconnectTimer) {
+
+  if (
+    shuttingDown ||
+    reconnectTimer
+  ) {
     return
   }
 
-  reconnectTimer = setTimeout(async () => {
-    reconnectTimer = null
+  console.log(
+    '[...] Reconnecting in 5 seconds...'
+  )
 
-    try {
-      await startBot()
-    } catch (error) {
-      console.error(
-        '[Reconnect Error]:',
-        error?.message || error
-      )
-    }
-  }, 5000)
+  reconnectTimer =
+    setTimeout(() => {
+
+      reconnectTimer = null
+
+      startBot()
+
+    }, 5000)
 }
 
 async function startBot() {
-  if (stopping || starting) {
+
+  if (
+    shuttingDown ||
+    starting
+  ) {
     return
   }
 
   starting = true
 
   try {
+
     const {
       state,
       saveCreds
-    } = await useMultiFileAuthState(
-      SESSION_DIR
-    )
+    } =
+      await useMultiFileAuthState(
+        SESSION_DIR
+      )
 
-    if (stopping) {
-      starting = false
-      return
+    /*
+     * IMPORTANT:
+     * Check the session BEFORE creating/requesting pairing.
+     */
+    const sessionExists =
+      Boolean(
+        state?.creds?.registered
+      )
+
+    if (sessionExists) {
+
+      console.log(
+        '[OK] Existing WhatsApp session detected.'
+      )
+
+      console.log(
+        '[OK] Pairing code will NOT be requested.'
+      )
+
+    } else {
+
+      console.log(
+        '[!] No registered WhatsApp session found.'
+      )
+
+      console.log(
+        '[!] Pairing will be requested only once.'
+      )
+    }
+
+    /*
+     * Close the previous socket if one exists.
+     */
+    if (sock) {
+      try {
+        sock.ev.removeAllListeners()
+        sock.ws?.close()
+      } catch {}
     }
 
     sock = makeWASocket({
+
       auth: state,
 
       browser:
@@ -344,6 +469,8 @@ async function startBot() {
 
       generateHighQualityLinkPreview: false,
 
+      badSessionDeleteHistory: true,
+
       connectTimeoutMs: 60000,
 
       defaultQueryTimeoutMs: 60000,
@@ -354,84 +481,82 @@ async function startBot() {
 
       fireInitQueries: true,
 
-      emitOwnEvents: false,
+      emitOwnEvents: false
 
-      shouldIgnoreJid: jid =>
-        jid === 'status@broadcast'
     })
 
-    const currentSock = sock
-
-    currentSock.ev.on(
+    sock.ev.on(
       'creds.update',
       saveCreds
     )
 
-    currentSock.ev.on(
+    sock.ev.on(
       'messages.upsert',
       update => {
-        if (currentSock !== sock) {
-          return
-        }
 
         Promise.resolve(
           handleMessages(
             update,
-            currentSock,
+            sock,
             plugins,
             messageListeners
           )
         ).catch(error => {
+
           console.error(
             '[Message Handler Error]:',
             error?.message || error
           )
+
         })
+
       }
     )
 
-    currentSock.ev.on(
+    sock.ev.on(
       'group-participants.update',
       update => {
-        if (currentSock !== sock) {
-          return
-        }
 
         Promise.resolve(
           handleGroupParticipants(
             update,
-            currentSock,
+            sock,
             groupListeners
           )
         ).catch(error => {
+
           console.error(
             '[Group Handler Error]:',
             error?.message || error
           )
+
         })
+
       }
     )
 
-    currentSock.ev.on(
+    sock.ev.on(
       'connection.update',
       async ({
         connection,
         lastDisconnect
       }) => {
 
-        if (currentSock !== sock) {
-          return
-        }
+        if (
+          connection === 'connecting'
+        ) {
 
-        if (connection === 'connecting') {
           console.log(
             '[...] Connecting to WhatsApp...'
           )
+
         }
 
-        if (connection === 'open') {
+        if (
+          connection === 'open'
+        ) {
+
           starting = false
-          pairingRequested = false
 
           console.log(
             '\n[OK] Raza-MD connected successfully!'
@@ -452,9 +577,21 @@ async function startBot() {
           console.log(
             `Message Listeners: ${messageListeners.length}\n`
           )
+
+          /*
+           * IMPORTANT:
+           * Do NOT reset pairingRequested here.
+           *
+           * If the connection later closes,
+           * another pairing code will NOT be requested.
+           */
+
         }
 
-        if (connection === 'close') {
+        if (
+          connection === 'close'
+        ) {
+
           starting = false
 
           const code =
@@ -463,7 +600,12 @@ async function startBot() {
             )?.output?.statusCode
 
           const loggedOut =
-            code === DisconnectReason.loggedOut
+            code ===
+            DisconnectReason.loggedOut
+
+          const badSession =
+            code ===
+            DisconnectReason.badSession
 
           console.log(
             `[-] Connection closed. Code: ${
@@ -471,36 +613,75 @@ async function startBot() {
             }`
           )
 
-          if (sock === currentSock) {
-            sock = null
-          }
-
           if (loggedOut) {
+
             console.log(
-              '[!] Session was logged out.'
+              '[!] WhatsApp session was logged out.'
             )
 
             console.log(
-              '[!] Delete the "session" folder and re-pair.'
+              '[!] Delete the session folder and pair again.'
             )
 
             return
           }
 
-          console.log(
-            '[...] Reconnecting in 5 seconds...'
-          )
+          if (badSession) {
+
+            console.log(
+              '[!] WhatsApp session is invalid.'
+            )
+
+            console.log(
+              '[!] Delete the session folder and pair again.'
+            )
+
+            return
+          }
+
+          /*
+           * 515 is allowed.
+           *
+           * It can happen during the pairing/login flow.
+           * Reconnect using the existing auth state.
+           *
+           * DO NOT request another pairing code.
+           */
+          if (code === 515) {
+
+            console.log(
+              '[i] Connection closed with 515.'
+            )
+
+            console.log(
+              '[i] Reconnecting with existing session state...'
+            )
+
+          }
 
           scheduleReconnect()
         }
       }
     )
 
-    if (!state.creds.registered) {
+    starting = false
+
+    /*
+     * ONLY request pairing when there is NO registered session.
+     *
+     * This happens once.
+     */
+    if (
+      !sessionExists &&
+      !pairingRequested
+    ) {
+
       await requestPairingCode()
+
     }
 
   } catch (error) {
+
     starting = false
 
     console.error(
@@ -508,37 +689,55 @@ async function startBot() {
       error?.message || error
     )
 
-    if (!stopping) {
-      scheduleReconnect()
-    }
+    scheduleReconnect()
   }
 }
 
-process.on('SIGTERM', () => {
-  stopping = true
-  clearReconnectTimer()
+async function shutdown(signal) {
+
+  if (shuttingDown) {
+    return
+  }
+
+  shuttingDown = true
+
+  console.log(
+    `\n[!] ${signal} received. Shutting down...`
+  )
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
 
   try {
-    sock?.end?.(
-      new Error('Process terminated')
-    )
+
+    if (sock) {
+
+      sock.ev.removeAllListeners()
+
+      try {
+        sock.ws?.close()
+      } catch {}
+
+      sock = null
+    }
+
   } catch {}
 
   process.exit(0)
-})
+}
 
-process.on('SIGINT', () => {
-  stopping = true
-  clearReconnectTimer()
+process.once(
+  'SIGTERM',
+  () => shutdown('SIGTERM')
+)
 
-  try {
-    sock?.end?.(
-      new Error('Process interrupted')
-    )
-  } catch {}
-
-  process.exit(0)
-})
+process.once(
+  'SIGINT',
+  () => shutdown('SIGINT')
+)
 
 await loadPlugins()
+
 await startBot()
