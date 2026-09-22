@@ -3,26 +3,33 @@ import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState
 } from '@whiskeysockets/baileys'
+
 import P from 'pino'
 import { Boom } from '@hapi/boom'
 import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
 import { pathToFileURL } from 'node:url'
+
 import {
   handleMessages,
   handleGroupParticipants
 } from './handler.js'
 
 const ROOT = process.cwd()
+
 const SESSION_DIR = path.join(ROOT, 'session')
 const PLUGIN_DIR = path.join(ROOT, 'plugins')
+
 const PREFIX = process.env.PREFIX || '!'
 
 const logger = P({ level: 'silent' })
 
-let sock
-let reconnecting = false
+let sock = null
+let starting = false
+let reconnectTimer = null
+let pairingRequested = false
+let stopping = false
 
 const plugins = new Map()
 const messageListeners = []
@@ -34,23 +41,18 @@ function question(text) {
     output: process.stdout
   })
 
-  return new Promise((resolve) => {
-    rl.question(text, (answer) => {
+  return new Promise(resolve => {
+    rl.question(text, answer => {
       rl.close()
       resolve(answer.trim())
     })
   })
 }
 
-/**
- * Detect special listener plugins.
- * Examples:
- * __antilink_listener
- * __antigroupstatus_listener
- * __antimention_listener
- */
 function isSpecialListener(pluginObj) {
-  if (typeof pluginObj?.command !== 'string') return false
+  if (typeof pluginObj?.command !== 'string') {
+    return false
+  }
 
   return (
     pluginObj.command.startsWith('__') &&
@@ -58,17 +60,13 @@ function isSpecialListener(pluginObj) {
   )
 }
 
-/**
- * Universal Plugin Registrar
- */
 async function registerPluginObject(pluginObj, file) {
-  if (!pluginObj || typeof pluginObj !== 'object') return
+  if (!pluginObj || typeof pluginObj !== 'object') {
+    return
+  }
 
   const specialListener = isSpecialListener(pluginObj)
 
-  /*
-   * 1. Group Listeners
-   */
   const isGroupListener =
     pluginObj.command === '__welcome_listener' ||
     pluginObj.type === 'welcome' ||
@@ -81,16 +79,13 @@ async function registerPluginObject(pluginObj, file) {
   if (isGroupListener) {
     if (!groupListeners.includes(pluginObj)) {
       groupListeners.push(pluginObj)
-      console.log(`[+] Group listener registered from ${file}`)
+
+      console.log(
+        `[+] Group listener registered from ${file}`
+      )
     }
   }
 
-  /*
-   * 2. Message Listeners
-   *
-   * Any __something_listener except __welcome_listener
-   * is treated as a passive message listener.
-   */
   const isMessageListener =
     (
       specialListener &&
@@ -102,23 +97,24 @@ async function registerPluginObject(pluginObj, file) {
   if (isMessageListener && !isGroupListener) {
     if (!messageListeners.includes(pluginObj)) {
       messageListeners.push(pluginObj)
-      console.log(`[+] Message listener registered from ${file}`)
+
+      console.log(
+        `[+] Message listener registered from ${file}`
+      )
     }
   }
 
-  /*
-   * 3. Normal Commands
-   *
-   * Special listener commands are never registered
-   * as normal commands.
-   */
   if (pluginObj.command && !specialListener) {
-    const commandNames = Array.isArray(pluginObj.command)
-      ? pluginObj.command
-      : [pluginObj.command]
+    const commandNames =
+      Array.isArray(pluginObj.command)
+        ? pluginObj.command
+        : [pluginObj.command]
 
     for (const command of commandNames) {
-      plugins.set(String(command).toLowerCase(), pluginObj)
+      plugins.set(
+        String(command).toLowerCase(),
+        pluginObj
+      )
     }
 
     console.log(
@@ -127,25 +123,26 @@ async function registerPluginObject(pluginObj, file) {
   }
 }
 
-/**
- * Dynamic Plugin Auto-Loader
- */
 async function loadPlugins() {
   plugins.clear()
   messageListeners.length = 0
   groupListeners.length = 0
 
   if (!fs.existsSync(PLUGIN_DIR)) {
-    fs.mkdirSync(PLUGIN_DIR, { recursive: true })
+    fs.mkdirSync(
+      PLUGIN_DIR,
+      { recursive: true }
+    )
   }
 
-  const entries = fs
-    .readdirSync(PLUGIN_DIR)
-    .filter((file) => file.endsWith('.js'))
+  const entries =
+    fs.readdirSync(PLUGIN_DIR)
+      .filter(file => file.endsWith('.js'))
 
   for (const file of entries) {
     try {
-      const filePath = path.join(PLUGIN_DIR, file)
+      const filePath =
+        path.join(PLUGIN_DIR, file)
 
       const url =
         `${pathToFileURL(filePath).href}?v=${Date.now()}`
@@ -160,16 +157,22 @@ async function loadPlugins() {
       const processed = new Set()
 
       for (const item of exports) {
-        if (!item || processed.has(item)) continue
+        if (!item || processed.has(item)) {
+          continue
+        }
 
         processed.add(item)
 
-        await registerPluginObject(item, file)
+        await registerPluginObject(
+          item,
+          file
+        )
       }
-    } catch (e) {
+
+    } catch (error) {
       console.error(
         `[-] Failed to load plugin ${file}:`,
-        e?.message || e
+        error?.message || error
       )
     }
   }
@@ -177,28 +180,161 @@ async function loadPlugins() {
   console.log(
     `\n[SUMMARY] Loaded: ${plugins.size} commands, ` +
     `${messageListeners.length} message listeners, ` +
-    `and ${groupListeners.length} group listeners.\n`
+    `${groupListeners.length} group listeners.\n`
   )
 }
 
-/**
- * Start WhatsApp Bot
- */
-async function startBot() {
-  if (reconnecting) return
+async function getPairingNumber() {
+  let number =
+    (process.env.PAIRING_NUMBER || '')
+      .replace(/\D/g, '')
 
-  reconnecting = true
+  if (number) {
+    console.log(
+      `[+] Pairing number loaded from environment: ${number}`
+    )
+
+    return number
+  }
+
+  if (
+    process.env.NODE_ENV === 'production' ||
+    process.env.DYNO
+  ) {
+    console.error(
+      '\n[!] PAIRING_NUMBER is required on Heroku.'
+    )
+
+    console.error(
+      '[!] Set PAIRING_NUMBER in Heroku Config Vars.'
+    )
+
+    return ''
+  }
+
+  number =
+    await question(
+      'Enter WhatsApp number with country code (digits only): '
+    )
+
+  return number.replace(/\D/g, '')
+}
+
+async function requestPairingCode() {
+  if (pairingRequested) {
+    return
+  }
+
+  pairingRequested = true
+
+  const number =
+    await getPairingNumber()
+
+  if (!number || number.length < 7) {
+    console.error(
+      '[-] Invalid pairing number.'
+    )
+
+    pairingRequested = false
+    return
+  }
+
+  try {
+    await new Promise(resolve =>
+      setTimeout(resolve, 3000)
+    )
+
+    if (!sock) {
+      pairingRequested = false
+      return
+    }
+
+    const pairingCode =
+      await sock.requestPairingCode(number)
+
+    const formattedCode =
+      pairingCode
+        ?.match(/.{1,4}/g)
+        ?.join('-') ||
+      pairingCode
+
+    console.log(
+      '\n=================================='
+    )
+
+    console.log(
+      '       RAZA-MD PAIRING CODE'
+    )
+
+    console.log(
+      `          ${formattedCode}`
+    )
+
+    console.log(
+      '==================================\n'
+    )
+
+  } catch (error) {
+    pairingRequested = false
+
+    console.error(
+      '[-] Pairing code request failed:',
+      error?.message || error
+    )
+  }
+}
+
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+}
+
+function scheduleReconnect() {
+  if (stopping || reconnectTimer) {
+    return
+  }
+
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null
+
+    try {
+      await startBot()
+    } catch (error) {
+      console.error(
+        '[Reconnect Error]:',
+        error?.message || error
+      )
+    }
+  }, 5000)
+}
+
+async function startBot() {
+  if (stopping || starting) {
+    return
+  }
+
+  starting = true
 
   try {
     const {
       state,
       saveCreds
-    } = await useMultiFileAuthState(SESSION_DIR)
+    } = await useMultiFileAuthState(
+      SESSION_DIR
+    )
+
+    if (stopping) {
+      starting = false
+      return
+    }
 
     sock = makeWASocket({
       auth: state,
 
-      browser: Browsers.ubuntu('Chrome'),
+      browser:
+        Browsers.ubuntu('Chrome'),
 
       logger,
 
@@ -208,50 +344,84 @@ async function startBot() {
 
       generateHighQualityLinkPreview: false,
 
-      badSessionDeleteHistory: true
+      connectTimeoutMs: 60000,
+
+      defaultQueryTimeoutMs: 60000,
+
+      keepAliveIntervalMs: 25000,
+
+      retryRequestDelayMs: 250,
+
+      fireInitQueries: true,
+
+      emitOwnEvents: false,
+
+      shouldIgnoreJid: jid =>
+        jid === 'status@broadcast'
     })
 
-    /*
-     * Save authentication credentials
-     */
-    sock.ev.on('creds.update', saveCreds)
+    const currentSock = sock
 
-    /*
-     * Message Handler
-     */
-    sock.ev.on(
+    currentSock.ev.on(
+      'creds.update',
+      saveCreds
+    )
+
+    currentSock.ev.on(
       'messages.upsert',
-      (update) =>
-        handleMessages(
-          update,
-          sock,
-          plugins,
-          messageListeners
-        )
+      update => {
+        if (currentSock !== sock) {
+          return
+        }
+
+        Promise.resolve(
+          handleMessages(
+            update,
+            currentSock,
+            plugins,
+            messageListeners
+          )
+        ).catch(error => {
+          console.error(
+            '[Message Handler Error]:',
+            error?.message || error
+          )
+        })
+      }
     )
 
-    /*
-     * Group Participant Handler
-     */
-    sock.ev.on(
+    currentSock.ev.on(
       'group-participants.update',
-      (update) =>
-        handleGroupParticipants(
-          update,
-          sock,
-          groupListeners
-        )
+      update => {
+        if (currentSock !== sock) {
+          return
+        }
+
+        Promise.resolve(
+          handleGroupParticipants(
+            update,
+            currentSock,
+            groupListeners
+          )
+        ).catch(error => {
+          console.error(
+            '[Group Handler Error]:',
+            error?.message || error
+          )
+        })
+      }
     )
 
-    /*
-     * Connection Handler
-     */
-    sock.ev.on(
+    currentSock.ev.on(
       'connection.update',
       async ({
         connection,
         lastDisconnect
       }) => {
+
+        if (currentSock !== sock) {
+          return
+        }
 
         if (connection === 'connecting') {
           console.log(
@@ -260,10 +430,11 @@ async function startBot() {
         }
 
         if (connection === 'open') {
-          reconnecting = false
+          starting = false
+          pairingRequested = false
 
           console.log(
-            '[OK] Raza connected successfully!'
+            '\n[OK] Raza-MD connected successfully!'
           )
 
           console.log(
@@ -279,17 +450,17 @@ async function startBot() {
           )
 
           console.log(
-            `Message Listeners: ${messageListeners.length}`
+            `Message Listeners: ${messageListeners.length}\n`
           )
         }
 
         if (connection === 'close') {
-          reconnecting = false
+          starting = false
 
           const code =
-            new Boom(lastDisconnect?.error)
-              ?.output
-              ?.statusCode
+            new Boom(
+              lastDisconnect?.error
+            )?.output?.statusCode
 
           const loggedOut =
             code === DisconnectReason.loggedOut
@@ -300,9 +471,10 @@ async function startBot() {
             }`
           )
 
-          /*
-           * Logged out
-           */
+          if (sock === currentSock) {
+            sock = null
+          }
+
           if (loggedOut) {
             console.log(
               '[!] Session was logged out.'
@@ -315,114 +487,58 @@ async function startBot() {
             return
           }
 
-          /*
-           * Reconnect automatically
-           */
           console.log(
-            '[...] Reconnecting in 3 seconds...'
+            '[...] Reconnecting in 5 seconds...'
           )
 
-          setTimeout(
-            startBot,
-            3000
-          )
+          scheduleReconnect()
         }
       }
     )
 
-    /*
-     * Pairing Code Login
-     */
-    if (!sock.authState.creds.registered) {
-
-      let number =
-        (process.env.PAIRING_NUMBER || '')
-          .replace(/\D/g, '')
-
-      if (!number) {
-        number = (
-          await question(
-            'Enter WhatsApp number with country code (digits only): '
-          )
-        ).replace(/\D/g, '')
-      }
-
-      if (!number || number.length < 7) {
-        reconnecting = false
-
-        console.error(
-          '[-] Invalid phone number provided.'
-        )
-
-        return
-      }
-
-      /*
-       * Give connection a moment before
-       * requesting the pairing code.
-       */
-      await new Promise(
-        (resolve) =>
-          setTimeout(resolve, 3000)
-      )
-
-      try {
-        const pairingCode =
-          await sock.requestPairingCode(number)
-
-        const formattedCode =
-          pairingCode
-            ?.match(/.{1,4}/g)
-            ?.join('-') ||
-          pairingCode
-
-        console.log(
-          '\n=================================='
-        )
-
-        console.log(
-          '       RAZA PAIRING CODE'
-        )
-
-        console.log(
-          `          ${formattedCode}`
-        )
-
-        console.log(
-          '==================================\n'
-        )
-
-      } catch (e) {
-        reconnecting = false
-
-        console.error(
-          '[-] Pairing code request failed:',
-          e?.message || e
-        )
-
-        return
-      }
+    if (!state.creds.registered) {
+      await requestPairingCode()
     }
 
-  } catch (e) {
-
-    reconnecting = false
+  } catch (error) {
+    starting = false
 
     console.error(
-      'Startup error:',
-      e
+      '[Startup Error]:',
+      error?.message || error
     )
 
-    setTimeout(
-      startBot,
-      5000
-    )
+    if (!stopping) {
+      scheduleReconnect()
+    }
   }
 }
 
-/*
- * Load all plugins first,
- * then start WhatsApp.
- */
+process.on('SIGTERM', () => {
+  stopping = true
+  clearReconnectTimer()
+
+  try {
+    sock?.end?.(
+      new Error('Process terminated')
+    )
+  } catch {}
+
+  process.exit(0)
+})
+
+process.on('SIGINT', () => {
+  stopping = true
+  clearReconnectTimer()
+
+  try {
+    sock?.end?.(
+      new Error('Process interrupted')
+    )
+  } catch {}
+
+  process.exit(0)
+})
+
 await loadPlugins()
 await startBot()
