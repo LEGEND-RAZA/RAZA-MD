@@ -1,11 +1,14 @@
 import { getDb, saveDb } from '../database/index.js'
 
 const DB_KEY = 'ajoin.json'
-const DEFAULT_DATA = { targetJids: [], enabled: false, mode: 'specific' }
+const DEFAULT_DATA = {
+  targetJids: [],
+  enabled: false,
+  mode: 'specific'
+}
 
-// Convert text to Small Caps font
 function toSmallCaps(text) {
-  const smallCapsMap = {
+  const map = {
     a: '\u1D00', b: '\u0299', c: '\u1D04', d: '\u1D05', e: '\u1D07',
     f: '\u0493', g: '\u0262', h: '\u029C', i: '\u026A', j: '\u1D0A',
     k: '\u1D0B', l: '\u029F', m: '\u1D0D', n: '\u0274', o: '\u1D0F',
@@ -17,11 +20,11 @@ function toSmallCaps(text) {
   return String(text || '')
     .toLowerCase()
     .split('')
-    .map((char) => smallCapsMap[char] || char)
+    .map(char => map[char] || char)
     .join('')
 }
 
-const delay = (ms) => new Promise((r) => setTimeout(r, ms))
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 export default {
   command: ['ajoin'],
@@ -41,7 +44,7 @@ export default {
         ? `📋 *${toSmallCaps('target jids')}:*\n\n${data.targetJids.join('\n')}`
         : `❌ ${toSmallCaps('no target jids added')}`
 
-      return await sock.sendMessage(
+      return sock.sendMessage(
         jid,
         { text: listText },
         { quoted: message }
@@ -50,7 +53,7 @@ export default {
 
     if (cmd === 'add') {
       if (!value) {
-        return await sock.sendMessage(
+        return sock.sendMessage(
           jid,
           { text: `❌ ${toSmallCaps('please provide a jid')}` },
           { quoted: message }
@@ -62,7 +65,7 @@ export default {
         saveDb(DB_KEY, data)
       }
 
-      return await sock.sendMessage(
+      return sock.sendMessage(
         jid,
         { text: `✅ ${toSmallCaps('jid added')}` },
         { quoted: message }
@@ -71,17 +74,17 @@ export default {
 
     if (cmd === 'del' || cmd === 'remove') {
       if (!value) {
-        return await sock.sendMessage(
+        return sock.sendMessage(
           jid,
           { text: `❌ ${toSmallCaps('please provide a jid')}` },
           { quoted: message }
         )
       }
 
-      data.targetJids = data.targetJids.filter((j) => j !== value)
+      data.targetJids = data.targetJids.filter(j => j !== value)
       saveDb(DB_KEY, data)
 
-      return await sock.sendMessage(
+      return sock.sendMessage(
         jid,
         { text: `❌ ${toSmallCaps('jid removed')}` },
         { quoted: message }
@@ -93,7 +96,7 @@ export default {
       data.mode = 'specific'
       saveDb(DB_KEY, data)
 
-      return await sock.sendMessage(
+      return sock.sendMessage(
         jid,
         { text: `✅ ${toSmallCaps('autojoin enabled specific jids')}` },
         { quoted: message }
@@ -105,7 +108,7 @@ export default {
       data.mode = 'all'
       saveDb(DB_KEY, data)
 
-      return await sock.sendMessage(
+      return sock.sendMessage(
         jid,
         { text: `✅ ${toSmallCaps('autojoin enabled all chats')}` },
         { quoted: message }
@@ -116,7 +119,7 @@ export default {
       data.enabled = false
       saveDb(DB_KEY, data)
 
-      return await sock.sendMessage(
+      return sock.sendMessage(
         jid,
         { text: `❌ ${toSmallCaps('autojoin disabled')}` },
         { quoted: message }
@@ -134,17 +137,16 @@ export default {
 
 ${toSmallCaps('status')}: ${data.enabled ? '✅ ON' : '❌ OFF'} | ${toSmallCaps('mode')}: ${data.mode === 'all' ? toSmallCaps('all chats') : toSmallCaps('specific jids')}`
 
-    return await sock.sendMessage(
+    return sock.sendMessage(
       jid,
       { text: helpText },
       { quoted: message }
     )
   },
 
-  // Passive message listener hook for auto-joining group links
   async on({ sock, message, text }) {
     try {
-      if (!message || !message.message || message.key.fromMe) return
+      if (!message?.message || message.key.fromMe) return
 
       const data = getDb(DB_KEY, DEFAULT_DATA)
       if (!data.enabled) return
@@ -153,14 +155,14 @@ ${toSmallCaps('status')}: ${data.enabled ? '✅ ON' : '❌ OFF'} | ${toSmallCaps
       const sender = message.key.participant || remoteJid
 
       if (data.mode === 'specific') {
-        const isAllowedSender =
+        const allowed =
           data.targetJids.includes(sender) ||
           data.targetJids.includes(remoteJid)
 
-        if (!isAllowedSender) return
+        if (!allowed) return
       }
 
-      const match = text.match(
+      const match = text?.match(
         /chat\.whatsapp\.com\/([0-9A-Za-z]{20,26})/i
       )
 
@@ -182,26 +184,17 @@ ${toSmallCaps('status')}: ${data.enabled ? '✅ ON' : '❌ OFF'} | ${toSmallCaps
       } catch (e) {
         const err = String(e?.message || e).toLowerCase()
 
-        if (err.includes('already') || err.includes('409')) {
-          await sock.sendMessage(remoteJid, {
-            react: {
-              text: '⚠️',
-              key: message.key
-            }
-          })
-        } else {
-          await sock.sendMessage(remoteJid, {
-            react: {
-              text: '❌',
-              key: message.key
-            }
-          })
-        }
+        await sock.sendMessage(remoteJid, {
+          react: {
+            text: err.includes('already') || err.includes('409')
+              ? '⚠️'
+              : '❌',
+            key: message.key
+          }
+        })
       }
     } catch (err) {
       console.error('[AutoJoin Exception]:', err)
     }
   }
 }
-
-If you send the other plugins, I can fix the same Chrome/UTF-8 font and emoji corruption in them while keeping their functionality unchanged.
