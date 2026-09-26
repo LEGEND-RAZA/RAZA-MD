@@ -9,6 +9,8 @@ import {
   Boom
 } from '@hapi/boom'
 
+import pino from 'pino'
+
 import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
@@ -26,7 +28,9 @@ import {
 } from './handler.js'
 
 const ROOT = process.cwd()
-const SESSION_DIR = path.join(ROOT, 'session')
+
+const SESSION_DIR =
+  path.join(ROOT, 'session')
 
 const PREFIX =
   process.env.PREFIX || '.'
@@ -41,13 +45,19 @@ const OWNER_NUMBER =
   process.env.OWNER_NUMBER || ''
 
 const ALWAYS_ONLINE =
-  String(process.env.ALWAYS_ONLINE)
-    .toLowerCase() === 'true'
+  String(
+    process.env.ALWAYS_ONLINE || 'false'
+  ).toLowerCase() === 'true'
 
 const MODE =
   process.env.MODE || 'private'
 
 let reconnecting = false
+
+const logger =
+  pino({
+    level: 'silent'
+  })
 
 function sleep(ms) {
   return new Promise(
@@ -55,7 +65,7 @@ function sleep(ms) {
   )
 }
 
-function cleanSessionDirectory() {
+function ensureSessionDirectory() {
   if (
     !fs.existsSync(
       SESSION_DIR
@@ -63,19 +73,15 @@ function cleanSessionDirectory() {
   ) {
     fs.mkdirSync(
       SESSION_DIR,
-      { recursive: true }
+      {
+        recursive: true
+      }
     )
   }
 }
 
 function clearSessionDirectory() {
-  if (
-    !fs.existsSync(
-      SESSION_DIR
-    )
-  ) {
-    return
-  }
+  ensureSessionDirectory()
 
   for (
     const file of
@@ -101,7 +107,26 @@ function clearSessionDirectory() {
   }
 }
 
-async function restoreRemoteSession(token) {
+function hasLocalSession() {
+  if (
+    !fs.existsSync(
+      SESSION_DIR
+    )
+  ) {
+    return false
+  }
+
+  const files =
+    fs.readdirSync(
+      SESSION_DIR
+    )
+
+  return files.length > 0
+}
+
+async function restoreRemoteSession(
+  token
+) {
   if (
     !PAIR_SERVER_URL ||
     !token
@@ -114,15 +139,23 @@ async function restoreRemoteSession(token) {
       '[SESSION] Fetching session from pairing server...'
     )
 
+    const baseUrl =
+      PAIR_SERVER_URL.replace(
+        /\/$/,
+        ''
+      )
+
     const url =
-      `${PAIR_SERVER_URL.replace(/\/$/, '')}/api/session/${encodeURIComponent(token)}`
+      `${baseUrl}/api/session/${encodeURIComponent(token)}`
 
     const response =
       await fetch(url)
 
-    if (!response.ok) {
+    if (
+      !response.ok
+    ) {
       console.error(
-        `[SESSION] Server returned ${response.status}`
+        `[SESSION] Pairing server returned HTTP ${response.status}`
       )
 
       return false
@@ -133,7 +166,8 @@ async function restoreRemoteSession(token) {
 
     if (
       !data?.success ||
-      !data?.files
+      !data?.files ||
+      typeof data.files !== 'object'
     ) {
       console.error(
         '[SESSION] Invalid session response.'
@@ -142,13 +176,23 @@ async function restoreRemoteSession(token) {
       return false
     }
 
-    cleanSessionDirectory()
     clearSessionDirectory()
 
     for (
-      const [fileName, content]
-      of Object.entries(data.files)
+      const [
+        fileName,
+        content
+      ]
+      of Object.entries(
+        data.files
+      )
     ) {
+      if (
+        typeof content !== 'string'
+      ) {
+        continue
+      }
+
       const filePath =
         path.join(
           SESSION_DIR,
@@ -186,23 +230,6 @@ async function restoreRemoteSession(token) {
   }
 }
 
-function hasLocalSession() {
-  if (
-    !fs.existsSync(
-      SESSION_DIR
-    )
-  ) {
-    return false
-  }
-
-  const files =
-    fs.readdirSync(
-      SESSION_DIR
-    )
-
-  return files.length > 0
-}
-
 async function askPairingNumber() {
   const rl =
     readline.createInterface({
@@ -211,34 +238,56 @@ async function askPairingNumber() {
     })
 
   const number =
-    await new Promise(resolve => {
-      rl.question(
-        'Enter WhatsApp number with country code: ',
-        answer => {
-          rl.close()
-          resolve(
-            String(answer || '')
-              .replace(/\D/g, '')
-          )
-        }
-      )
-    })
+    await new Promise(
+      resolve => {
+        rl.question(
+          'Enter WhatsApp number with country code: ',
+          answer => {
+            rl.close()
+
+            resolve(
+              String(
+                answer || ''
+              ).replace(
+                /\D/g,
+                ''
+              )
+            )
+          }
+        )
+      }
+    )
 
   return number
 }
 
-async function createSocket() {
-  cleanSessionDirectory()
+async function loadRemoteSessionIfNeeded() {
+  if (
+    hasLocalSession()
+  ) {
+    console.log(
+      '[SESSION] Local session found.'
+    )
+
+    return true
+  }
 
   if (
-    !hasLocalSession() &&
     SESSION_ID &&
     PAIR_SERVER_URL
   ) {
-    await restoreRemoteSession(
+    return await restoreRemoteSession(
       SESSION_ID
     )
   }
+
+  return false
+}
+
+async function createSocket() {
+  ensureSessionDirectory()
+
+  await loadRemoteSessionIfNeeded()
 
   const {
     state,
@@ -256,6 +305,8 @@ async function createSocket() {
         Browsers.macOS(
           'Chrome'
         ),
+
+      logger,
 
       printQRInTerminal:
         false,
@@ -279,14 +330,7 @@ async function createSocket() {
         25000,
 
       retryRequestDelayMs:
-        250,
-
-      logger: {
-        level: 'silent',
-        child() {
-          return this
-        }
-      }
+        250
     })
 
   sock.ev.on(
@@ -312,7 +356,7 @@ async function createSocket() {
           '╭──────────────────────────╮'
         )
         console.log(
-          '│   ʀᴀᴢᴀ-ᴍᴅ ᴄᴏɴɴᴇᴄᴛᴇᴅ   │'
+          '│     ʀᴀᴢᴀ-ᴍᴅ ᴄᴏɴɴᴇᴄᴛᴇᴅ     │'
         )
         console.log(
           '╰──────────────────────────╯'
@@ -323,19 +367,21 @@ async function createSocket() {
         console.log(
           `✓ Mode   : ${MODE}`
         )
-        console.log(
-          `✓ Plugins: ${plugins.size}`
-        )
-        console.log('')
 
         try {
           await loadPlugins()
+
+          console.log(
+            `✓ Plugins: ${plugins.size}`
+          )
         } catch (error) {
           console.error(
             '[PLUGIN] Failed to load plugins:',
             error?.message || error
           )
         }
+
+        console.log('')
 
         try {
           if (
@@ -383,7 +429,7 @@ async function createSocket() {
           DisconnectReason.loggedOut
         ) {
           console.error(
-            '[CONNECTION] Session logged out. Delete the session and pair again.'
+            '[CONNECTION] Session logged out.'
           )
 
           process.exit(1)
@@ -406,7 +452,7 @@ async function createSocket() {
           reconnecting = true
 
           console.log(
-            '[CONNECTION] Reconnecting...'
+            '[CONNECTION] Reconnecting in 3 seconds...'
           )
 
           await sleep(3000)
@@ -497,17 +543,20 @@ async function start() {
     '╭──────────────────────────╮'
   )
   console.log(
-    '│       ʀᴀᴢᴀ-ᴍᴅ sᴛᴀʀᴛɪɴɢ       │'
+    '│       ʀᴀᴢᴀ-ᴍᴅ sᴛᴀʀᴛɪɴɢ      │'
   )
   console.log(
     '╰──────────────────────────╯'
   )
+
   console.log(
     `✓ Prefix : ${PREFIX}`
   )
+
   console.log(
     `✓ Mode   : ${MODE}`
   )
+
   console.log('')
 
   if (
@@ -535,8 +584,9 @@ async function start() {
       console.log(
         `[PAIRING] Number: ${number}`
       )
+
       console.log(
-        '[PAIRING] Use the pairing website to generate your session token.'
+        '[PAIRING] Generate your session token from the pairing website.'
       )
     } else {
       console.error(
