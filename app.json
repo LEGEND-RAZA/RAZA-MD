@@ -34,6 +34,9 @@
     "worker": {
       "quantity": 1,
       "size": "basic"
+    },
+    "web": {
+      "quantity": 0
     }
   }
 }
