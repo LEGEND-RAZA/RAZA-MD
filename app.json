@@ -1,35 +1,47 @@
 {
   "name": "Raza-MD",
-  "description": "Raza-MD WhatsApp Bot",
-  "repository": "https://github.com/LEGEND-RAZA/RAZA-MD",
+  "description": "Multi-Device WhatsApp Bot powered by Legend Raza",
   "keywords": [
     "whatsapp",
-    "baileys",
     "bot",
+    "baileys",
     "raza-md",
-    "nodejs"
+    "multi-device"
   ],
-  "stack": "heroku-24",
-  "buildpacks": [
-    {
-      "url": "heroku/nodejs"
-    }
-  ],
+  "repository": "https://github.com/LEGEND-RAZA/RAZA-MD",
+  "logo": "https://i.imgur.com/v8OQOaD.png",
   "env": {
-    "PAIRING_NUMBER": {
-      "description": "WhatsApp number for pairing code.",
+    "SESSION_ID": {
+      "description": "Put your Raza-MD session string here (e.g., levanter_...)",
       "required": true,
-      "value": "923XXXXXXXXX"
+      "value": ""
     },
     "PREFIX": {
-      "description": "Bot command prefix.",
+      "description": "Bot command prefix (default is .)",
       "required": false,
       "value": "."
     },
-    "OWNER_NUMBER": {
-      "description": "Bot owner WhatsApp number.",
+    "MODE": {
+      "description": "Work mode: 'public' or 'private'",
       "required": false,
-      "value": "923280966780"
+      "value": "public"
+    }
+  },
+  "buildpacks": [
+    {
+      "url": "heroku/nodejs"
+    },
+    {
+      "url": "https://github.com/jonathanong/heroku-buildpack-ffmpeg-latest"
+    },
+    {
+      "url": "https://github.com/clhuang/heroku-buildpack-webp-binaries.git"
+    }
+  ],
+  "formation": {
+    "worker": {
+      "quantity": 1,
+      "size": "eco"
     }
   }
 }
