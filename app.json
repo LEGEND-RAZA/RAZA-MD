@@ -1,29 +1,35 @@
 {
   "name": "raza-md",
-  "description": "",
-  "keywords": ["nodejs"],
+  "description": "Raza-MD WhatsApp Bot",
+  "keywords": [
+    "nodejs",
+    "whatsapp",
+    "baileys"
+  ],
   "repository": "https://github.com/LEGEND-RAZA/RAZA-MD",
-  "success_url": "/",
-  "stack": "container",
+  "stack": "heroku-24",
+  "buildpacks": [
+    {
+      "url": "heroku/nodejs"
+    }
+  ],
   "env": {
     "SESSION_ID": {
-      "description": "session id",
+      "description": "Raza-MD session ID",
       "required": true,
       "value": ""
-    },
-    "PREFIX": {
-      "description": "prefix",
-      "required": false,
-      "value": "."
     },
     "PAIR_SERVER_URL": {
       "description": "Raza-MD pairing server URL",
       "required": true,
       "value": "https://pair-web-3e08f4e68faf.herokuapp.com"
+    },
+    "PREFIX": {
+      "description": "Bot command prefix",
+      "required": false,
+      "value": "."
     }
   },
-  "addons": [],
-  "buildpacks": [],
   "formation": {
     "worker": {
       "quantity": 1,
