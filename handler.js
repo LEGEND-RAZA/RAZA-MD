@@ -6,15 +6,10 @@ import {
 } from './database/index.js'
 
 const OWNER_NUMBER =
-  (process.env.OWNER_NUMBER || '').replace(/\D/g, '')
+  (process.env.OWNER_NUMBER || '')
+    .replace(/\D/g, '')
 
 let alwaysOnlineTimer = null
-
-/*
- * ==============================
- * PREFIX
- * ==============================
- */
 
 export function getPrefix() {
   const prefixDb =
@@ -24,17 +19,11 @@ export function getPrefix() {
     })
 
   return (
-    prefixDb.prefix ||
+    prefixDb?.prefix ||
     process.env.PREFIX ||
     '.'
   )
 }
-
-/*
- * ==============================
- * JID HELPERS
- * ==============================
- */
 
 export function normalizeJid(jid) {
   if (!jid) return ''
@@ -42,7 +31,8 @@ export function normalizeJid(jid) {
   try {
     return jidNormalizedUser(jid)
   } catch {
-    return String(jid).split(':')[0]
+    return String(jid)
+      .split(':')[0]
   }
 }
 
@@ -55,27 +45,24 @@ export function getSender(message) {
 }
 
 export function senderNumber(jid) {
-  return String(jid)
+  return String(jid || '')
     .split('@')[0]
     .split(':')[0]
     .replace(/\D/g, '')
 }
 
 export function isGroup(jid) {
-  return String(jid).endsWith('@g.us')
+  return String(jid || '')
+    .endsWith('@g.us')
 }
-
-/*
- * ==============================
- * OWNER
- * ==============================
- */
 
 export function checkIsOwner(
   message,
   sock
 ) {
-  if (message?.key?.fromMe) {
+  if (
+    message?.key?.fromMe
+  ) {
     return true
   }
 
@@ -109,7 +96,7 @@ export function checkIsOwner(
 
   const dynamicSudos =
     Array.isArray(
-      sudoData.sudoNumbers
+      sudoData?.sudoNumbers
     )
       ? sudoData.sudoNumbers
       : []
@@ -140,12 +127,6 @@ export function checkIsOwner(
   return false
 }
 
-/*
- * ==============================
- * MESSAGE HELPERS
- * ==============================
- */
-
 export function unwrapMessage(message) {
   let m =
     message?.message
@@ -164,7 +145,9 @@ export function unwrapMessage(message) {
       m?.viewOnceMessageV2Extension?.message ||
       m?.documentWithCaptionMessage?.message
 
-    if (!next) break
+    if (!next) {
+      break
+    }
 
     m = next
   }
@@ -176,7 +159,9 @@ export function getText(message) {
   const m =
     unwrapMessage(message)
 
-  if (!m) return ''
+  if (!m) {
+    return ''
+  }
 
   return (
     m.conversation ||
@@ -194,7 +179,9 @@ export function getQuotedMessage(
   const m =
     unwrapMessage(message)
 
-  if (!m) return null
+  if (!m) {
+    return null
+  }
 
   const context =
     m.extendedTextMessage?.contextInfo ||
@@ -210,12 +197,6 @@ export function getQuotedMessage(
   )
 }
 
-/*
- * ==============================
- * SETTINGS
- * ==============================
- */
-
 function getSettings() {
   return getDb(
     'settings.json',
@@ -230,22 +211,19 @@ export function getAutoRead() {
   const data =
     getSettings()
 
-  return data.autoread === true
+  return data?.autoread === true
 }
 
 export function getAlwaysOnline() {
   const data =
     getSettings()
 
-  return data.alwaysonline === true
+  return data?.alwaysonline === true
 }
 
-/*
- * FIX:
- * Save AutoRead setting to disk.
- */
-
-export function setAutoRead(value) {
+export function setAutoRead(
+  value
+) {
   const data =
     getSettings()
 
@@ -260,12 +238,9 @@ export function setAutoRead(value) {
   return data
 }
 
-/*
- * FIX:
- * Save Always Online setting to disk.
- */
-
-export function setAlwaysOnline(value) {
+export function setAlwaysOnline(
+  value
+) {
   const data =
     getSettings()
 
@@ -280,21 +255,16 @@ export function setAlwaysOnline(value) {
   return data
 }
 
-/*
- * ==============================
- * ALWAYS ONLINE
- * ==============================
- */
-
 export async function startAlwaysOnline(
   sock
 ) {
-  if (!sock) return
+  if (!sock) {
+    return
+  }
 
-  /*
-   * Prevent duplicate timers.
-   */
-  if (alwaysOnlineTimer) {
+  if (
+    alwaysOnlineTimer
+  ) {
     clearInterval(
       alwaysOnlineTimer
     )
@@ -303,11 +273,6 @@ export async function startAlwaysOnline(
       null
   }
 
-  /*
-   * If disabled, make the bot
-   * unavailable and don't start
-   * a timer.
-   */
   if (
     !getAlwaysOnline()
   ) {
@@ -320,26 +285,15 @@ export async function startAlwaysOnline(
     return
   }
 
-  /*
-   * Set online immediately.
-   */
   try {
     await sock.sendPresenceUpdate(
       'available'
     )
   } catch {}
 
-  /*
-   * Refresh presence every
-   * 20 seconds.
-   */
   alwaysOnlineTimer =
     setInterval(
       async () => {
-        /*
-         * Setting was disabled
-         * while timer was running.
-         */
         if (
           !getAlwaysOnline()
         ) {
@@ -359,26 +313,20 @@ export async function startAlwaysOnline(
       20000
     )
 
-  /*
-   * Don't keep Node alive only
-   * because of this timer.
-   */
   if (
-    typeof alwaysOnlineTimer
-      ?.unref === 'function'
+    typeof alwaysOnlineTimer?.unref ===
+    'function'
   ) {
     alwaysOnlineTimer.unref()
   }
 }
 
-/*
- * Stop Always Online immediately.
- */
-
 export async function stopAlwaysOnline(
   sock
 ) {
-  if (alwaysOnlineTimer) {
+  if (
+    alwaysOnlineTimer
+  ) {
     clearInterval(
       alwaysOnlineTimer
     )
@@ -387,7 +335,9 @@ export async function stopAlwaysOnline(
       null
   }
 
-  if (!sock) return
+  if (!sock) {
+    return
+  }
 
   try {
     await sock.sendPresenceUpdate(
@@ -396,12 +346,6 @@ export async function stopAlwaysOnline(
   } catch {}
 }
 
-/*
- * ==============================
- * MESSAGE HANDLER
- * ==============================
- */
-
 export async function handleMessages(
   update,
   sock,
@@ -409,15 +353,30 @@ export async function handleMessages(
   messageListeners
 ) {
   if (
+    !update ||
     update.type !== 'notify'
   ) {
     return
   }
 
-  /*
-   * Make sure Always Online
-   * is active if enabled.
-   */
+  if (
+    !sock
+  ) {
+    return
+  }
+
+  const pluginMap =
+    plugins instanceof Map
+      ? plugins
+      : new Map()
+
+  const listeners =
+    Array.isArray(
+      messageListeners
+    )
+      ? messageListeners
+      : []
+
   if (
     getAlwaysOnline() &&
     !alwaysOnlineTimer
@@ -442,12 +401,6 @@ export async function handleMessages(
         message.key?.remoteJid ||
         ''
 
-      /*
-       * ==========================
-       * AUTO READ
-       * ==========================
-       */
-
       if (
         getAutoRead() &&
         message.key?.id
@@ -459,21 +412,11 @@ export async function handleMessages(
         } catch {}
       }
 
-      /*
-       * ==========================
-       * GROUP STATUS
-       * ==========================
-       */
-
       const isGroupStatusPost =
         !!message
           .message
           ?.groupStatusMessageV2
 
-      /*
-       * Ignore normal WhatsApp
-       * status messages.
-       */
       if (
         rawJid ===
           'status@broadcast' &&
@@ -507,69 +450,55 @@ export async function handleMessages(
       const activePrefix =
         getPrefix()
 
-      /*
-       * ==========================
-       * PASSIVE LISTENERS
-       * ==========================
-       */
-
       for (
         const listener of
-        messageListeners
+        listeners
       ) {
+        if (!listener) {
+          continue
+        }
+
         try {
+          const listenerData = {
+            sock,
+            message,
+            text,
+            isOwner,
+            isGroup:
+              isGroupChat,
+            isStatus:
+              isGroupStatusPost
+          }
+
           if (
             typeof listener.on ===
             'function'
           ) {
-            await listener.on({
-              sock,
-              message,
-              text,
-              isOwner,
-              isGroup:
-                isGroupChat,
-              isStatus:
-                isGroupStatusPost
-            })
+            await listener.on(
+              listenerData
+            )
           } else if (
             typeof listener.run ===
             'function'
           ) {
-            await listener.run({
-              sock,
-              message,
-              text,
-              isOwner,
-              isGroup:
-                isGroupChat,
-              isStatus:
-                isGroupStatusPost
-            })
+            await listener.run(
+              listenerData
+            )
           }
-        } catch (err) {
+        } catch (error) {
           console.error(
             '[Listener Error]:',
-            err
+            error?.message ||
+              error
           )
         }
       }
 
-      /*
-       * Group status posts are
-       * listener-only.
-       */
       if (
         isGroupStatusPost
       ) {
         continue
       }
-
-      /*
-       * ==========================
-       * COMMAND CHECK
-       * ==========================
-       */
 
       if (
         !text ||
@@ -580,10 +509,9 @@ export async function handleMessages(
         continue
       }
 
-      /*
-       * Owner / sudo only.
-       */
-      if (!isOwner) {
+      if (
+        !isOwner
+      ) {
         continue
       }
 
@@ -610,35 +538,19 @@ export async function handleMessages(
         parts
 
       const plugin =
-        plugins.get(
+        pluginMap.get(
           command
         )
 
-      /*
-       * Unknown commands
-       * don't react.
-       */
       if (!plugin) {
         continue
       }
 
       console.log(
-        `⚡ Executing: ${
-          activePrefix
-        }${command} from ${
-          senderNumber(
-            getSender(
-              message
-            )
-          )
-        }`
+        `⚡ Executing: ${activePrefix}${command} from ${senderNumber(
+          getSender(message)
+        )}`
       )
-
-      /*
-       * ==========================
-       * COMMAND REACTION
-       * ==========================
-       */
 
       try {
         await sock.sendMessage(
@@ -670,12 +582,6 @@ export async function handleMessages(
         )
       } catch {}
 
-      /*
-       * ==========================
-       * EXECUTE PLUGIN
-       * ==========================
-       */
-
       const quotedMessage =
         getQuotedMessage(
           message
@@ -694,36 +600,61 @@ export async function handleMessages(
         isOwner,
         isGroup:
           isGroupChat,
-        plugins
+        plugins: pluginMap
       })
 
     } catch (error) {
       console.error(
-        'Message handling error:',
-        error
+        '[HANDLER] Message handling error:',
+        error?.stack ||
+          error?.message ||
+          error
       )
     }
   }
 }
-
-/*
- * ==============================
- * GROUP PARTICIPANTS
- * ==============================
- */
 
 export async function handleGroupParticipants(
   update,
   sock,
   groupListeners
 ) {
-  if (!update) return
+  if (
+    !update ||
+    !sock
+  ) {
+    return
+  }
+
+  const listeners =
+    Array.isArray(
+      groupListeners
+    )
+      ? groupListeners
+      : []
+
+  if (
+    !listeners.length
+  ) {
+    return
+  }
 
   for (
     const listener of
-    groupListeners
+    listeners
   ) {
+    if (!listener) {
+      continue
+    }
+
     try {
+      if (
+        typeof listener.run !==
+        'function'
+      ) {
+        continue
+      }
+
       await listener.run({
         sock,
         update
@@ -731,7 +662,9 @@ export async function handleGroupParticipants(
     } catch (error) {
       console.error(
         '[Group Listener Error]:',
-        error
+        error?.stack ||
+          error?.message ||
+          error
       )
     }
   }
