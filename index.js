@@ -1,19 +1,16 @@
-import {
-  makeWASocket,
+import makeWASocket, {
   Browsers,
   DisconnectReason,
   useMultiFileAuthState
 } from '@whiskeysockets/baileys'
 
-import {
-  Boom
-} from '@hapi/boom'
-
+import { Boom } from '@hapi/boom'
 import pino from 'pino'
 
-import fs from 'node:fs'
-import path from 'node:path'
-import readline from 'node:readline'
+import fs from 'fs'
+import path from 'path'
+import readline from 'readline'
+import { fileURLToPath } from 'url'
 
 import {
   loadPlugins,
@@ -24,138 +21,72 @@ import {
 
 import {
   handleMessages,
-  handleGroupParticipants
+  handleGroupParticipants,
+  startAlwaysOnline
 } from './handler.js'
 
-const ROOT = process.cwd()
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
 
-const SESSION_DIR =
-  path.join(ROOT, 'session')
-
-const PREFIX =
-  process.env.PREFIX || '.'
+const ROOT = __dirname
+const SESSION_DIR = path.join(ROOT, 'session')
 
 const PAIR_SERVER_URL =
-  process.env.PAIR_SERVER_URL || ''
+  process.env.PAIR_SERVER_URL ||
+  'https://pair-web-3e08f4e68faf.herokuapp.com'
 
 const SESSION_ID =
   process.env.SESSION_ID || ''
 
-const OWNER_NUMBER =
-  process.env.OWNER_NUMBER || ''
+const logger = pino({
+  level: 'silent'
+})
 
-const ALWAYS_ONLINE =
-  String(
-    process.env.ALWAYS_ONLINE || 'false'
-  ).toLowerCase() === 'true'
-
-const MODE =
-  process.env.MODE || 'private'
-
+let sock = null
 let reconnecting = false
 
-const logger =
-  pino({
-    level: 'silent'
-  })
-
 function sleep(ms) {
-  return new Promise(
-    resolve => setTimeout(resolve, ms)
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function ensureDirectories() {
+  if (!fs.existsSync(SESSION_DIR)) {
+    fs.mkdirSync(SESSION_DIR, {
+      recursive: true
+    })
+  }
+}
+
+function decodeBase64(value) {
+  return Buffer.from(
+    value,
+    'base64'
   )
 }
 
-function ensureSessionDirectory() {
-  if (
-    !fs.existsSync(
-      SESSION_DIR
-    )
-  ) {
-    fs.mkdirSync(
-      SESSION_DIR,
-      {
-        recursive: true
-      }
-    )
-  }
-}
-
-function clearSessionDirectory() {
-  ensureSessionDirectory()
-
-  for (
-    const file of
-    fs.readdirSync(
-      SESSION_DIR
-    )
-  ) {
-    const filePath =
-      path.join(
-        SESSION_DIR,
-        file
-      )
-
-    try {
-      fs.rmSync(
-        filePath,
-        {
-          recursive: true,
-          force: true
-        }
-      )
-    } catch {}
-  }
-}
-
-function hasLocalSession() {
-  if (
-    !fs.existsSync(
-      SESSION_DIR
-    )
-  ) {
-    return false
-  }
-
-  const files =
-    fs.readdirSync(
-      SESSION_DIR
+async function restoreRemoteSession() {
+  if (!SESSION_ID) {
+    console.log(
+      '[SESSION] SESSION_ID not found.'
     )
 
-  return files.length > 0
-}
-
-async function restoreRemoteSession(
-  token
-) {
-  if (
-    !PAIR_SERVER_URL ||
-    !token
-  ) {
     return false
   }
 
   try {
     console.log(
-      '[SESSION] Fetching session from pairing server...'
+      '[SESSION] Restoring remote session...'
     )
 
-    const baseUrl =
-      PAIR_SERVER_URL.replace(
-        /\/$/,
-        ''
-      )
-
     const url =
-      `${baseUrl}/api/session/${encodeURIComponent(token)}`
+      `${PAIR_SERVER_URL.replace(/\/+$/, '')}/api/session/${encodeURIComponent(SESSION_ID)}`
 
     const response =
       await fetch(url)
 
-    if (
-      !response.ok
-    ) {
+    if (!response.ok) {
       console.error(
-        `[SESSION] Pairing server returned HTTP ${response.status}`
+        `[SESSION] Remote server returned ${response.status}`
       )
 
       return false
@@ -165,8 +96,8 @@ async function restoreRemoteSession(
       await response.json()
 
     if (
-      !data?.success ||
-      !data?.files ||
+      !data ||
+      !data.files ||
       typeof data.files !== 'object'
     ) {
       console.error(
@@ -176,43 +107,52 @@ async function restoreRemoteSession(
       return false
     }
 
-    clearSessionDirectory()
+    ensureDirectories()
+
+    let restored = 0
 
     for (
-      const [
-        fileName,
-        content
-      ]
-      of Object.entries(
-        data.files
-      )
+      const [fileName, encoded] of
+      Object.entries(data.files)
     ) {
       if (
-        typeof content !== 'string'
+        typeof encoded !==
+        'string'
       ) {
         continue
       }
 
-      const filePath =
+      const safeName =
+        path.basename(fileName)
+
+      if (
+        !safeName ||
+        safeName === '.' ||
+        safeName === '..'
+      ) {
+        continue
+      }
+
+      const target =
         path.join(
           SESSION_DIR,
-          fileName
+          safeName
         )
-
-      fs.mkdirSync(
-        path.dirname(filePath),
-        {
-          recursive: true
-        }
-      )
 
       fs.writeFileSync(
-        filePath,
-        Buffer.from(
-          content,
-          'base64'
-        )
+        target,
+        decodeBase64(encoded)
       )
+
+      restored++
+    }
+
+    if (!restored) {
+      console.error(
+        '[SESSION] No session files restored.'
+      )
+
+      return false
     }
 
     console.log(
@@ -220,9 +160,10 @@ async function restoreRemoteSession(
     )
 
     return true
+
   } catch (error) {
     console.error(
-      '[SESSION] Failed to restore remote session:',
+      '[SESSION] Restore error:',
       error?.message || error
     )
 
@@ -230,382 +171,351 @@ async function restoreRemoteSession(
   }
 }
 
-async function askPairingNumber() {
-  const rl =
-    readline.createInterface({
-      input: process.stdin,
-      output: process.stdout
-    })
-
-  const number =
-    await new Promise(
-      resolve => {
-        rl.question(
-          'Enter WhatsApp number with country code: ',
-          answer => {
-            rl.close()
-
-            resolve(
-              String(
-                answer || ''
-              ).replace(
-                /\D/g,
-                ''
-              )
-            )
-          }
-        )
-      }
-    )
-
-  return number
-}
-
-async function loadRemoteSessionIfNeeded() {
-  if (
-    hasLocalSession()
-  ) {
-    console.log(
-      '[SESSION] Local session found.'
-    )
-
-    return true
+async function connect() {
+  if (reconnecting) {
+    return
   }
 
-  if (
-    SESSION_ID &&
-    PAIR_SERVER_URL
-  ) {
-    return await restoreRemoteSession(
-      SESSION_ID
-    )
-  }
+  reconnecting = true
 
-  return false
-}
+  try {
+    ensureDirectories()
 
-async function createSocket() {
-  ensureSessionDirectory()
+    await restoreRemoteSession()
 
-  await loadRemoteSessionIfNeeded()
-
-  const {
-    state,
-    saveCreds
-  } =
-    await useMultiFileAuthState(
+    const {
+      state,
+      saveCreds
+    } = await useMultiFileAuthState(
       SESSION_DIR
     )
 
-  const sock =
-    makeWASocket({
-      auth: state,
+    sock =
+      makeWASocket({
+        auth: state,
 
-      browser:
-        Browsers.macOS(
-          'Chrome'
-        ),
+        logger,
 
-      logger,
+        browser:
+          Browsers.ubuntu(
+            'Chrome'
+          ),
 
-      printQRInTerminal:
-        false,
+        printQRInTerminal:
+          false,
 
-      markOnlineOnConnect:
-        ALWAYS_ONLINE,
+        markOnlineOnConnect:
+          false,
 
-      syncFullHistory:
-        false,
+        syncFullHistory:
+          false,
 
-      generateHighQualityLinkPreview:
-        false,
+        generateHighQualityLinkPreview:
+          false
+      })
 
-      connectTimeoutMs:
-        60000,
+    sock.ev.on(
+      'creds.update',
+      saveCreds
+    )
 
-      defaultQueryTimeoutMs:
-        60000,
+    sock.ev.on(
+      'connection.update',
+      async update => {
+        const {
+          connection,
+          lastDisconnect
+        } = update
 
-      keepAliveIntervalMs:
-        25000,
+        if (
+          connection ===
+          'connecting'
+        ) {
+          console.log(
+            '[WA] Connecting to WhatsApp...'
+          )
+        }
 
-      retryRequestDelayMs:
-        250
-    })
-
-  sock.ev.on(
-    'creds.update',
-    saveCreds
-  )
-
-  sock.ev.on(
-    'connection.update',
-    async update => {
-      const {
-        connection,
-        lastDisconnect
-      } = update
-
-      if (
-        connection === 'open'
-      ) {
-        reconnecting = false
-
-        console.log('')
-        console.log(
-          '╭──────────────────────────╮'
-        )
-        console.log(
-          '│     ʀᴀᴢᴀ-ᴍᴅ ᴄᴏɴɴᴇᴄᴛᴇᴅ     │'
-        )
-        console.log(
-          '╰──────────────────────────╯'
-        )
-        console.log(
-          `✓ Prefix : ${PREFIX}`
-        )
-        console.log(
-          `✓ Mode   : ${MODE}`
-        )
-
-        try {
-          await loadPlugins()
+        if (
+          connection ===
+          'open'
+        ) {
+          console.log(
+            ''
+          )
 
           console.log(
-            `✓ Plugins: ${plugins.size}`
+            '╭──────────────────────────────╮'
           )
-        } catch (error) {
-          console.error(
-            '[PLUGIN] Failed to load plugins:',
-            error?.message || error
+          console.log(
+            '│     𝐑ᴀᴢᴀ-𝐌ᴅ 𝐂ᴏɴɴᴇᴄᴛᴇᴅ     │'
           )
-        }
-
-        console.log('')
-
-        try {
-          if (
-            sock.user?.id
-          ) {
-            await sock.sendMessage(
-              sock.user.id,
-              {
-                text:
-                  `𝐇ᴇʟʟᴏ 𝐓ʜᴇʀᴇ 𝐑ᴀᴢᴀ-𝐌ᴅ 𝐔ꜱᴇʀ!\n\n` +
-                  `> 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛꜱᴀᴘᴘ 𝐁ᴏᴛ 𝐋ᴏᴀᴅᴇᴅ\n\n` +
-                  `╭─❒ ʀᴀᴢᴀ-ᴍᴅ\n` +
-                  `│ ⟡ ᴏᴡɴᴇʀ : ʟᴇɢᴇɴᴅ ʀᴀᴢᴀ\n` +
-                  `│ ⟡ ᴍᴏᴅᴇ : ${MODE}\n` +
-                  `│ ⟡ ᴘʀᴇғɪx : ${PREFIX}\n` +
-                  `│ ⟡ ᴘʟᴜɢɪɴs : ${plugins.size}\n` +
-                  `╰──────────────\n\n` +
-                  `𝐓ʜᴀɴᴋꜱ 𝐅ᴏʀ 𝐔ꜱɪɴɢ 𝐑ᴀᴢᴀ-𝐌ᴅ\n` +
-                  `𝐏ᴏᴡᴇʀᴇᴅ 𝐁ʏ 𝐋ᴇɢᴇɴᴅ 𝐑ᴀᴢᴀ`
-              }
-            )
-          }
-        } catch (error) {
-          console.error(
-            '[STARTUP] Failed to send startup message:',
-            error?.message || error
+          console.log(
+            '├──────────────────────────────┤'
           )
-        }
-      }
-
-      if (
-        connection === 'close'
-      ) {
-        const statusCode =
-          new Boom(
-            lastDisconnect?.error
-          )?.output?.statusCode
-
-        console.log(
-          `[CONNECTION] Closed with status ${statusCode}`
-        )
-
-        if (
-          statusCode ===
-          DisconnectReason.loggedOut
-        ) {
-          console.error(
-            '[CONNECTION] Session logged out.'
+          console.log(
+            '│  𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ     │'
           )
-
-          process.exit(1)
-        }
-
-        if (
-          statusCode ===
-          DisconnectReason.connectionReplaced
-        ) {
-          console.error(
-            '[CONNECTION] Connection replaced by another session.'
+          console.log(
+            '│  𝐁ᴏᴛ 𝐈s 𝐑ᴜɴɴɪɴɢ             │'
           )
-
-          process.exit(1)
-        }
-
-        if (
-          !reconnecting
-        ) {
-          reconnecting = true
+          console.log(
+            '╰──────────────────────────────╯'
+          )
 
           console.log(
-            '[CONNECTION] Reconnecting in 3 seconds...'
+            `[WA] User: ${sock?.user?.id || 'unknown'}`
           )
 
-          await sleep(3000)
+          console.log(
+            `[WA] Plugins: ${plugins.size}`
+          )
+
+          console.log(
+            `[WA] Message listeners: ${messageListeners.length}`
+          )
+
+          console.log(
+            `[WA] Group listeners: ${groupListeners.length}`
+          )
+
+          reconnecting = false
 
           try {
-            await createSocket()
+            await startAlwaysOnline(
+              sock
+            )
           } catch (error) {
-            reconnecting = false
-
             console.error(
-              '[CONNECTION] Reconnect failed:',
-              error?.message || error
+              '[WA] Presence error:',
+              error?.message ||
+                error
+            )
+          }
+
+          return
+        }
+
+        if (
+          connection ===
+          'close'
+        ) {
+          const statusCode =
+            new Boom(
+              lastDisconnect?.error
+            )?.output
+              ?.statusCode
+
+          console.error(
+            `[WA] Connection closed. Code: ${statusCode || 'unknown'}`
+          )
+
+          reconnecting = false
+
+          if (
+            statusCode ===
+            DisconnectReason.loggedOut
+          ) {
+            console.error(
+              '[WA] Session logged out.'
             )
 
-            await sleep(5000)
-
             try {
-              await createSocket()
-            } catch (retryError) {
-              console.error(
-                '[CONNECTION] Retry failed:',
-                retryError?.message ||
-                  retryError
+              fs.rmSync(
+                SESSION_DIR,
+                {
+                  recursive: true,
+                  force: true
+                }
               )
+            } catch {}
 
-              process.exit(1)
-            }
+            console.error(
+              '[WA] Session directory removed. Generate a new session.'
+            )
+
+            return
+          }
+
+          if (
+            statusCode ===
+            DisconnectReason.badSession
+          ) {
+            console.error(
+              '[WA] Bad session detected.'
+            )
+
+            console.error(
+              '[WA] The stored session is invalid or corrupted.'
+            )
+
+            return
+          }
+
+          console.log(
+            '[WA] Reconnecting in 5 seconds...'
+          )
+
+          await sleep(5000)
+
+          try {
+            await connect()
+          } catch (error) {
+            console.error(
+              '[WA] Reconnect error:',
+              error?.message ||
+                error
+            )
           }
         }
       }
-    }
-  )
+    )
 
-  sock.ev.on(
-    'messages.upsert',
-    async event => {
-      try {
-        await handleMessages(
-          sock,
-          event,
-          {
+    sock.ev.on(
+      'messages.upsert',
+      async event => {
+        try {
+          await handleMessages(
+            event,
+            sock,
             plugins,
-            messageListeners,
-            prefix: PREFIX,
-            ownerNumber: OWNER_NUMBER,
-            mode: MODE
-          }
-        )
-      } catch (error) {
-        console.error(
-          '[HANDLER] Message error:',
-          error?.message || error
-        )
+            messageListeners
+          )
+        } catch (error) {
+          console.error(
+            '[HANDLER] Message event error:',
+            error?.stack ||
+              error?.message ||
+              error
+          )
+        }
       }
-    }
-  )
+    )
 
-  sock.ev.on(
-    'group-participants.update',
-    async event => {
-      try {
-        await handleGroupParticipants(
-          sock,
-          event,
-          {
-            plugins,
-            groupListeners,
-            prefix: PREFIX,
-            ownerNumber: OWNER_NUMBER,
-            mode: MODE
-          }
-        )
-      } catch (error) {
-        console.error(
-          '[HANDLER] Group event error:',
-          error?.message || error
-        )
+    sock.ev.on(
+      'group-participants.update',
+      async event => {
+        try {
+          await handleGroupParticipants(
+            event,
+            sock,
+            groupListeners
+          )
+        } catch (error) {
+          console.error(
+            '[HANDLER] Group event error:',
+            error?.stack ||
+              error?.message ||
+              error
+          )
+        }
       }
-    }
-  )
+    )
 
-  return sock
+  } catch (error) {
+    reconnecting = false
+
+    console.error(
+      '[WA] Connection error:',
+      error?.stack ||
+        error?.message ||
+        error
+    )
+
+    console.log(
+      '[WA] Retrying in 5 seconds...'
+    )
+
+    await sleep(5000)
+
+    try {
+      await connect()
+    } catch (retryError) {
+      console.error(
+        '[WA] Retry error:',
+        retryError?.message ||
+          retryError
+      )
+    }
+  }
 }
 
 async function start() {
-  console.log('')
   console.log(
-    '╭──────────────────────────╮'
-  )
-  console.log(
-    '│       ʀᴀᴢᴀ-ᴍᴅ sᴛᴀʀᴛɪɴɢ      │'
-  )
-  console.log(
-    '╰──────────────────────────╯'
+    ''
   )
 
   console.log(
-    `✓ Prefix : ${PREFIX}`
+    '╭──────────────────────────────╮'
   )
 
   console.log(
-    `✓ Mode   : ${MODE}`
+    '│       ʀᴀᴢᴀ-ᴍᴅ ᴡʜᴀᴛsᴀᴘᴘ      │'
   )
 
-  console.log('')
+  console.log(
+    '│        ᴍᴜʟᴛɪ-ᴅᴇᴠɪᴄᴇ        │'
+  )
 
-  if (
-    !SESSION_ID &&
-    !hasLocalSession()
-  ) {
+  console.log(
+    '╰──────────────────────────────╯'
+  )
+
+  console.log(
+    ''
+  )
+
+  console.log(
+    '[SYSTEM] Starting Raza-MD...'
+  )
+
+  console.log(
+    `[SYSTEM] Node: ${process.version}`
+  )
+
+  console.log(
+    `[SYSTEM] Prefix: ${process.env.PREFIX || '.'}`
+  )
+
+  console.log(
+    `[SYSTEM] Pair server: ${PAIR_SERVER_URL}`
+  )
+
+  try {
+    await loadPlugins()
+
     console.log(
-      '[SESSION] No SESSION_ID configured.'
+      `[PLUGIN] Loaded ${plugins.size} command(s).`
     )
 
-    if (
-      process.stdin.isTTY
-    ) {
-      const number =
-        await askPairingNumber()
+    console.log(
+      `[PLUGIN] Loaded ${messageListeners.length} message listener(s).`
+    )
 
-      if (!number) {
-        console.error(
-          '[SESSION] Invalid number.'
-        )
+    console.log(
+      `[PLUGIN] Loaded ${groupListeners.length} group listener(s).`
+    )
 
-        process.exit(1)
-      }
-
-      console.log(
-        `[PAIRING] Number: ${number}`
-      )
-
-      console.log(
-        '[PAIRING] Generate your session token from the pairing website.'
-      )
-    } else {
-      console.error(
-        '[SESSION] SESSION_ID is required on Heroku.'
-      )
-
-      process.exit(1)
-    }
+  } catch (error) {
+    console.error(
+      '[PLUGIN] Loader error:',
+      error?.stack ||
+        error?.message ||
+        error
+    )
   }
 
-  await createSocket()
+  await connect()
 }
 
 process.on(
   'uncaughtException',
   error => {
     console.error(
-      '[FATAL] Uncaught exception:',
-      error?.stack || error
+      '[PROCESS] Uncaught exception:',
+      error?.stack ||
+        error?.message ||
+        error
     )
   }
 )
@@ -614,19 +524,50 @@ process.on(
   'unhandledRejection',
   error => {
     console.error(
-      '[FATAL] Unhandled rejection:',
-      error?.stack || error
+      '[PROCESS] Unhandled rejection:',
+      error?.stack ||
+        error?.message ||
+        error
     )
   }
 )
 
-start().catch(
-  error => {
-    console.error(
-      '[FATAL] Startup failed:',
-      error?.stack || error
+process.on(
+  'SIGTERM',
+  () => {
+    console.log(
+      '[PROCESS] SIGTERM received.'
     )
 
-    process.exit(1)
+    try {
+      sock?.end(
+        new Error(
+          'Process terminated'
+        )
+      )
+    } catch {}
+
+    process.exit(0)
   }
 )
+
+process.on(
+  'SIGINT',
+  () => {
+    console.log(
+      '[PROCESS] SIGINT received.'
+    )
+
+    try {
+      sock?.end(
+        new Error(
+          'Process interrupted'
+        )
+      )
+    } catch {}
+
+    process.exit(0)
+  }
+)
+
+start()
