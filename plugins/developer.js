@@ -17,6 +17,12 @@ const PLUGIN_DIR =
     'plugins'
   )
 
+const GITHUB_REPO =
+  'LEGEND-RAZA/RAZA-MD'
+
+const GITHUB_BRANCH =
+  'main'
+
 export default {
   command: [
     'plugin',
@@ -602,42 +608,332 @@ export default {
     }
 
     if (command === 'update') {
+      const updateMode =
+        args?.[0]?.toLowerCase() === 'now'
+
+      const apiKey =
+        process.env.HEROKU_API_KEY
+
+      const appName =
+        process.env.HEROKU_APP_NAME
+
       try {
-        const {
-          stdout
-        } =
-          await execAsync(
-            'git pull --ff-only',
+        const githubApi =
+          `https://api.github.com/repos/${GITHUB_REPO}/commits/${GITHUB_BRANCH}`
+
+        const githubResponse =
+          await fetch(
+            githubApi,
             {
-              cwd: process.cwd(),
-              timeout: 60000,
-              maxBuffer:
-                1024 * 1024
+              headers: {
+                Accept:
+                  'application/vnd.github+json',
+                'User-Agent':
+                  'Raza-MD'
+              }
             }
           )
+
+        if (!githubResponse.ok) {
+          throw new Error(
+            `GitHub returned HTTP ${githubResponse.status}`
+          )
+        }
+
+        const latestCommit =
+          await githubResponse.json()
+
+        const latestSha =
+          latestCommit?.sha
+
+        const latestMessage =
+          latestCommit?.commit?.message
+            ?.split('\n')[0] ||
+          'No commit message'
+
+        if (!latestSha) {
+          throw new Error(
+            'Unable to get latest GitHub commit.'
+          )
+        }
+
+        let currentSha = null
+
+        try {
+          const {
+            stdout
+          } =
+            await execAsync(
+              'git rev-parse HEAD',
+              {
+                cwd: process.cwd(),
+                timeout: 10000
+              }
+            )
+
+          currentSha =
+            stdout
+              ?.trim()
+              ?.split('\n')[0]
+        } catch {}
+
+        const isUpToDate =
+          currentSha &&
+          currentSha === latestSha
+
+        if (!updateMode) {
+          if (isUpToDate) {
+            return await sock.sendMessage(
+              jid,
+              {
+                text:
+                  `╭━━━〔 𝐔ᴘᴅᴀᴛᴇ 𝐂ʜᴇᴄᴋ 〕━━━┈⊷\n` +
+                  `┃\n` +
+                  `┃ ✅ 𝐘ᴏᴜ'ʀᴇ 𝐔ᴘ 𝐓ᴏ 𝐃ᴀᴛᴇ\n` +
+                  `┃\n` +
+                  `┃ 𝐕ᴇʀsɪᴏɴ : ${latestSha.slice(0, 7)}\n` +
+                  `┃\n` +
+                  `╰━━━━━━━━━━━━━━━━━━━━┈⊷`
+              },
+              {
+                quoted: message
+              }
+            )
+          }
+
+          return await sock.sendMessage(
+            jid,
+            {
+              text:
+                `╭━━━〔 𝐔ᴘᴅᴀᴛᴇ 𝐀ᴠᴀɪʟᴀʙʟᴇ 〕━━━┈⊷\n` +
+                `┃\n` +
+                `┃ 🆕 𝐍ᴇᴡ 𝐔ᴘᴅᴀᴛᴇ 𝐅ᴏᴜɴᴅ\n` +
+                `┃\n` +
+                `┃ 𝐂ᴜʀʀᴇɴᴛ : ${currentSha ? currentSha.slice(0, 7) : 'Unknown'}\n` +
+                `┃ 𝐋ᴀᴛᴇsᴛ : ${latestSha.slice(0, 7)}\n` +
+                `┃\n` +
+                `┃ 𝐔ᴘᴅᴀᴛᴇ : ${latestMessage.slice(0, 300)}\n` +
+                `┃\n` +
+                `┃ 𝐔sᴇ .update now\n` +
+                `┃ 𝐓ᴏ 𝐔ᴘᴅᴀᴛᴇ\n` +
+                `┃\n` +
+                `╰━━━━━━━━━━━━━━━━━━━━┈⊷`
+            },
+            {
+              quoted: message
+            }
+          )
+        }
+
+        if (isUpToDate) {
+          return await sock.sendMessage(
+            jid,
+            {
+              text:
+                `✅ 𝐑ᴀᴢᴀ-𝐌ᴅ 𝐈s 𝐀ʟʀᴇᴀᴅʏ 𝐔ᴘ 𝐓ᴏ 𝐃ᴀᴛᴇ\n\n` +
+                `𝐂ᴜʀʀᴇɴᴛ 𝐂ᴏᴍᴍɪᴛ : ${latestSha.slice(0, 7)}`
+            },
+            {
+              quoted: message
+            }
+          )
+        }
+
+        if (!apiKey || !appName) {
+          return await sock.sendMessage(
+            jid,
+            {
+              text:
+                `❌ 𝐔ᴘᴅᴀᴛᴇ 𝐂ʀᴇᴅᴇɴᴛɪᴀʟs 𝐌ɪssɪɴɢ\n\n` +
+                `𝐑ᴇǫᴜɪʀᴇᴅ ғᴏʀ .update now:\n` +
+                `• HEROKU_API_KEY\n` +
+                `• HEROKU_APP_NAME`
+            },
+            {
+              quoted: message
+            }
+          )
+        }
 
         await sock.sendMessage(
           jid,
           {
             text:
-              `╭━━━〔 𝐔ᴘᴅᴀᴛᴇ 〕━━━┈⊷\n` +
-              `┃\n` +
-              `┃ ${(
-                stdout ||
-                'Already up to date.'
-              ).trim().slice(0, 5000)}\n` +
-              `┃\n` +
-              `╰━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
-              `🔄 𝐑ᴇsᴛᴀʀᴛɪɴɢ...`
+              `🚀 𝐒ᴛᴀʀᴛɪɴɢ 𝐔ᴘᴅᴀᴛᴇ...\n\n` +
+              `𝐂ᴜʀʀᴇɴᴛ : ${currentSha ? currentSha.slice(0, 7) : 'Unknown'}\n` +
+              `𝐍ᴇᴡ : ${latestSha.slice(0, 7)}\n` +
+              `𝐑ᴇᴘᴏ : ${GITHUB_REPO}`
           },
           {
             quoted: message
           }
         )
 
-        setTimeout(() => {
-          process.exit(0)
-        }, 1500)
+        const sourceUrl =
+          `https://codeload.github.com/${GITHUB_REPO}/tar.gz/${latestSha}`
+
+        const buildResponse =
+          await fetch(
+            `https://api.heroku.com/apps/${encodeURIComponent(appName)}/builds`,
+            {
+              method: 'POST',
+              headers: {
+                Accept:
+                  'application/vnd.heroku+json; version=3',
+                'Content-Type':
+                  'application/json',
+                Authorization:
+                  `Bearer ${apiKey}`
+              },
+              body:
+                JSON.stringify({
+                  source_blob: {
+                    url: sourceUrl
+                  }
+                })
+            }
+          )
+
+        const buildText =
+          await buildResponse.text()
+
+        let buildData
+
+        try {
+          buildData =
+            JSON.parse(
+              buildText
+            )
+        } catch {
+          buildData = null
+        }
+
+        if (!buildResponse.ok) {
+          throw new Error(
+            buildData?.message ||
+            buildData?.error ||
+            buildText ||
+            `Heroku HTTP ${buildResponse.status}`
+          )
+        }
+
+        const buildId =
+          buildData?.id
+
+        if (!buildId) {
+          throw new Error(
+            'Heroku did not return a build ID.'
+          )
+        }
+
+        await sock.sendMessage(
+          jid,
+          {
+            text:
+              `⏳ 𝐇ᴇʀᴏᴋᴜ 𝐁ᴜɪʟᴅ 𝐒ᴛᴀʀᴛᴇᴅ\n\n` +
+              `𝐁ᴜɪʟᴅ : ${buildId.slice(0, 8)}\n` +
+              `𝐂ᴏᴍᴍɪᴛ : ${latestSha.slice(0, 7)}`
+          },
+          {
+            quoted: message
+          }
+        )
+
+        let succeeded =
+          false
+
+        for (
+          let attempt = 0;
+          attempt < 60;
+          attempt++
+        ) {
+          await new Promise(
+            resolve =>
+              setTimeout(
+                resolve,
+                5000
+              )
+          )
+
+          const statusResponse =
+            await fetch(
+              `https://api.heroku.com/apps/${encodeURIComponent(appName)}/builds/${encodeURIComponent(buildId)}`,
+              {
+                headers: {
+                  Accept:
+                    'application/vnd.heroku+json; version=3',
+                  Authorization:
+                    `Bearer ${apiKey}`
+                }
+              }
+            )
+
+          const statusText =
+            await statusResponse.text()
+
+          let statusData
+
+          try {
+            statusData =
+              JSON.parse(
+                statusText
+              )
+          } catch {
+            statusData = null
+          }
+
+          if (!statusResponse.ok) {
+            throw new Error(
+              statusData?.message ||
+              statusData?.error ||
+              statusText ||
+              `Heroku HTTP ${statusResponse.status}`
+            )
+          }
+
+          const status =
+            statusData?.status
+
+          if (
+            status === 'succeeded'
+          ) {
+            succeeded = true
+            break
+          }
+
+          if (
+            status === 'failed' ||
+            status === 'cancelled'
+          ) {
+            throw new Error(
+              `Heroku build ${status}.`
+            )
+          }
+        }
+
+        if (!succeeded) {
+          throw new Error(
+            'Heroku build timed out.'
+          )
+        }
+
+        return await sock.sendMessage(
+          jid,
+          {
+            text:
+              `╭━━━〔 𝐔ᴘᴅᴀᴛᴇ 𝐒ᴜᴜᴄᴄᴇss 〕━━━┈⊷\n` +
+              `┃\n` +
+              `┃ 𝐑ᴇᴘᴏ : ${GITHUB_REPO}\n` +
+              `┃ 𝐂ᴏᴍᴍɪᴛ : ${latestSha.slice(0, 7)}\n` +
+              `┃ 𝐒ᴛᴀᴛᴜs : 𝐃ᴇᴘʟᴏʏᴇᴅ\n` +
+              `┃\n` +
+              `╰━━━━━━━━━━━━━━━━━━━━┈⊷\n\n` +
+              `♻️ 𝐇ᴇʀᴏᴋᴜ ᴡɪʟʟ 𝐑ᴇsᴛᴀʀᴛ 𝐑ᴀᴢᴀ-𝐌ᴅ.`
+          },
+          {
+            quoted: message
+          }
+        )
 
       } catch (error) {
         return await sock.sendMessage(
@@ -645,7 +941,6 @@ export default {
           {
             text:
               `❌ 𝐔ᴘᴅᴀᴛᴇ 𝐅ᴀɪʟᴇᴅ\n\n${
-                error?.stderr ||
                 error?.message ||
                 error
               }`
