@@ -1,835 +1,208 @@
 import makeWASocket, {
   Browsers,
   DisconnectReason,
-  useMultiFileAuthState
+  useMultiFileAuthState,
+  jidNormalizedUser
 } from '@whiskeysockets/baileys'
 
 import P from 'pino'
 import { Boom } from '@hapi/boom'
-import fs from 'node:fs'
 import path from 'node:path'
-import readline from 'node:readline'
-import { pathToFileURL } from 'node:url'
+import fs from 'node:fs'
 
 import {
   handleMessages,
   handleGroupParticipants
 } from './handler.js'
 
+import {
+  plugins,
+  messageListeners,
+  groupListeners,
+  loadPlugins
+} from './lib/plugin-loader.js'
+
 const ROOT = process.cwd()
+const SESSION_DIR = path.join(ROOT, 'session')
+const PREFIX = '.'
 
-const SESSION_DIR =
-  path.join(ROOT, 'session')
+const logger = P({
+  level: 'silent'
+})
 
-const PLUGIN_DIR =
-  path.join(ROOT, 'plugins')
+let sock
+let reconnecting = false
+let startMessageSent = false
 
-const PREFIX =
-  process.env.PREFIX || '!'
-
-const logger =
-  P({ level: 'silent' })
-
-let sock = null
-let starting = false
-let reconnectTimer = null
-let shuttingDown = false
-
-/*
- * Pairing code is requested only once
- * during the lifetime of this process.
+/**
+ * Initializes and restores creds.json from process.env.SESSION_ID
  */
-let pairingRequested = false
+async function initSession() {
+  const credsPath = path.join(SESSION_DIR, 'creds.json')
+  
+  if (fs.existsSync(credsPath)) return
 
-const plugins = new Map()
-const messageListeners = []
-const groupListeners = []
-
-function question(text) {
-  const rl =
-    readline.createInterface({
-      input: process.stdin,
-      output: process.stdout
-    })
-
-  return new Promise(resolve => {
-    rl.question(text, answer => {
-      rl.close()
-      resolve(answer.trim())
-    })
-  })
-}
-
-function isSpecialListener(pluginObj) {
-
-  if (
-    typeof pluginObj?.command !== 'string'
-  ) {
-    return false
-  }
-
-  return (
-    pluginObj.command.startsWith('__') &&
-    pluginObj.command.endsWith('_listener')
-  )
-}
-
-async function registerPluginObject(
-  pluginObj,
-  file
-) {
-
-  if (
-    !pluginObj ||
-    typeof pluginObj !== 'object'
-  ) {
+  const sessionId = process.env.SESSION_ID
+  if (!sessionId) {
+    console.error('[-] Error: SESSION_ID environment variable is missing!')
     return
   }
-
-  const specialListener =
-    isSpecialListener(pluginObj)
-
-  const isGroupListener =
-    pluginObj.command ===
-      '__welcome_listener' ||
-    pluginObj.type === 'welcome' ||
-    (
-      typeof pluginObj.run === 'function' &&
-      !pluginObj.command &&
-      pluginObj.isGroupEvent
-    )
-
-  if (isGroupListener) {
-
-    if (
-      !groupListeners.includes(pluginObj)
-    ) {
-
-      groupListeners.push(
-        pluginObj
-      )
-
-      console.log(
-        `[+] Group listener registered from ${file}`
-      )
-    }
-  }
-
-  const isMessageListener =
-    (
-      specialListener &&
-      pluginObj.command !==
-        '__welcome_listener'
-    ) ||
-    pluginObj.on === 'text' ||
-    typeof pluginObj.on === 'function'
-
-  if (
-    isMessageListener &&
-    !isGroupListener
-  ) {
-
-    if (
-      !messageListeners.includes(
-        pluginObj
-      )
-    ) {
-
-      messageListeners.push(
-        pluginObj
-      )
-
-      console.log(
-        `[+] Message listener registered from ${file}`
-      )
-    }
-  }
-
-  if (
-    pluginObj.command &&
-    !specialListener
-  ) {
-
-    const commandNames =
-      Array.isArray(pluginObj.command)
-        ? pluginObj.command
-        : [pluginObj.command]
-
-    for (
-      const command of commandNames
-    ) {
-
-      plugins.set(
-        String(command).toLowerCase(),
-        pluginObj
-      )
-    }
-
-    console.log(
-      `[+] Command(s) [${commandNames.join(', ')}] registered from ${file}`
-    )
-  }
-}
-
-async function loadPlugins() {
-
-  plugins.clear()
-  messageListeners.length = 0
-  groupListeners.length = 0
-
-  if (
-    !fs.existsSync(PLUGIN_DIR)
-  ) {
-
-    fs.mkdirSync(
-      PLUGIN_DIR,
-      {
-        recursive: true
-      }
-    )
-  }
-
-  const entries =
-    fs.readdirSync(PLUGIN_DIR)
-      .filter(file =>
-        file.endsWith('.js')
-      )
-
-  for (
-    const file of entries
-  ) {
-
-    try {
-
-      const filePath =
-        path.join(
-          PLUGIN_DIR,
-          file
-        )
-
-      const url =
-        `${pathToFileURL(filePath).href}?v=${Date.now()}`
-
-      const mod =
-        await import(url)
-
-      const exports = [
-        mod.default,
-        ...Object.values(mod)
-      ]
-
-      const processed =
-        new Set()
-
-      for (
-        const item of exports
-      ) {
-
-        if (
-          !item ||
-          processed.has(item)
-        ) {
-          continue
-        }
-
-        processed.add(item)
-
-        await registerPluginObject(
-          item,
-          file
-        )
-      }
-
-    } catch (error) {
-
-      console.error(
-        `[-] Failed to load plugin ${file}:`,
-        error?.message || error
-      )
-    }
-  }
-
-  console.log(
-    `\n[SUMMARY] Loaded: ${plugins.size} commands, ` +
-    `${messageListeners.length} message listeners, ` +
-    `${groupListeners.length} group listeners.\n`
-  )
-}
-
-async function getPairingNumber() {
-
-  let number =
-    (
-      process.env.PAIRING_NUMBER ||
-      ''
-    ).replace(/\D/g, '')
-
-  if (number) {
-
-    console.log(
-      `[+] Pairing number loaded from environment: ${number}`
-    )
-
-    return number
-  }
-
-  if (
-    process.env.NODE_ENV === 'production' ||
-    process.env.DYNO
-  ) {
-
-    console.error(
-      '\n[!] PAIRING_NUMBER is required on Heroku.'
-    )
-
-    console.error(
-      '[!] Add PAIRING_NUMBER in Config Vars.'
-    )
-
-    console.error(
-      '[!] Example: PAIRING_NUMBER=923XXXXXXXXX\n'
-    )
-
-    return ''
-  }
-
-  number =
-    await question(
-      'Enter WhatsApp number with country code (digits only): '
-    )
-
-  return number.replace(/\D/g, '')
-}
-
-async function requestPairingCode() {
-
-  /*
-   * Never request another code after
-   * one has already been requested.
-   */
-  if (pairingRequested) {
-    return
-  }
-
-  if (!sock) {
-    return
-  }
-
-  pairingRequested = true
-
-  const number =
-    await getPairingNumber()
-
-  if (
-    !number ||
-    number.length < 7
-  ) {
-
-    console.error(
-      '[-] Invalid pairing number.'
-    )
-
-    pairingRequested = false
-
-    return
-  }
-
-  console.log(
-    '\n=================================='
-  )
-
-  console.log(
-    '       RAZA-MD PAIRING CODE'
-  )
-
-  console.log(
-    `       Pairing Number: ${number}`
-  )
-
-  console.log(
-    '=================================='
-  )
 
   try {
+    await fs.promises.mkdir(SESSION_DIR, { recursive: true })
+    const cleanSession = sessionId.trim()
+    let sessionData = ''
 
-    /*
-     * Give Baileys time to initialize
-     * before requesting the pairing code.
-     */
-    await new Promise(
-      resolve =>
-        setTimeout(
-          resolve,
-          3000
-        )
-    )
+    if (cleanSession.startsWith('{')) {
+      sessionData = cleanSession
+    } else if (cleanSession.includes('://')) {
+      const res = await fetch(cleanSession)
+      sessionData = await res.text()
+    } else if (cleanSession.startsWith('levanter_') || cleanSession.startsWith('session_')) {
+      const code = cleanSession.replace(/^(levanter_|session_)/, '')
+      if (code.length > 50) {
+        sessionData = Buffer.from(code, 'base64').toString('utf-8')
+      } else {
+        const res = await fetch(`https://pastebin.com/raw/${code}`)
+        sessionData = await res.text()
+      }
+    } else {
+      try {
+        sessionData = Buffer.from(cleanSession, 'base64').toString('utf-8')
+      } catch {
+        sessionData = cleanSession
+      }
+    }
 
-    /*
-     * IMPORTANT:
-     *
-     * Do NOT check sock.authState here.
-     * The auth state is already checked in
-     * startBot() using state.creds.registered.
-     */
-
-    const pairingCode =
-      await sock.requestPairingCode(
-        number
-      )
-
-    const formattedCode =
-      pairingCode
-        ?.match(/.{1,4}/g)
-        ?.join('-') ||
-      pairingCode
-
-    console.log(
-      '\n=================================='
-    )
-
-    console.log(
-      '       RAZA-MD PAIRING CODE'
-    )
-
-    console.log(
-      `          ${formattedCode}`
-    )
-
-    console.log(
-      '==================================\n'
-    )
-
-    console.log(
-      '[!] Enter this code in WhatsApp.'
-    )
-
-    console.log(
-      '[!] No new pairing code will be requested after this.'
-    )
-
+    // Verify valid JSON structure before writing
+    JSON.parse(sessionData)
+    await fs.promises.writeFile(credsPath, sessionData, 'utf-8')
+    console.log('[+] SESSION_ID successfully loaded and restored.')
   } catch (error) {
-
-    /*
-     * Allow a retry only if the actual
-     * request failed.
-     */
-    pairingRequested = false
-
-    console.error(
-      '[-] Pairing code request failed:',
-      error?.message || error
-    )
+    console.error('[-] Failed to decode/parse SESSION_ID:', error?.message || error)
   }
 }
 
-function scheduleReconnect() {
-
-  if (
-    shuttingDown ||
-    reconnectTimer
-  ) {
+async function sendStartMessage() {
+  if (!sock?.user?.id) {
+    console.log('[!] Bot JID not available.')
     return
   }
 
-  console.log(
-    '[...] Reconnecting in 5 seconds...'
-  )
+  if (startMessageSent) return
 
-  reconnectTimer =
-    setTimeout(
-      () => {
+  try {
+    const botJid = jidNormalizedUser(sock.user.id)
 
-        reconnectTimer = null
+    if (!botJid) {
+      console.log('[!] Could not determine bot JID.')
+      return
+    }
 
-        startBot()
+    const startMessage = `
+𝐇ᴇʟʟᴏ 𝐓ʜᴇʀᴇ 𝐑ᴀᴢᴀ-𝐌ᴅ 𝐔ꜱᴇʀ! 👋
 
-      },
-      5000
-    )
+╭━━━〔 𝐑ᴀᴢᴀ-𝐌ᴅ 〕━━━┈⊷
+┃
+┃ 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ 𝐁ᴏᴛ
+┃ 𝐒ᴛᴀᴛᴜs : 𝐎ɴʟɪɴᴇ ✅
+┃ 𝐏ʀᴇғɪx : .
+┃ 𝐂ᴏᴍᴍᴀɴᴅs : ${plugins.size}
+┃ 𝐏ʟᴜɢɪɴs : ${new Set([...plugins.values()]).size}
+┃
+╰━━━━━━━━━━━━━━━━━━━━┈⊷
+
+> 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ 𝐁ᴏᴛ 𝐋ᴏᴀᴅᴇ𝐷 ✅
+
+𝐓ʜᴀɴᴋs 𝐅ᴏʀ 𝐔sɪɴɢ 𝐑ᴀᴢᴀ-𝐌ᴅ 💗
+
+𝐏ᴏᴡᴇʀᴇᴅ 𝐁ʏ 𝐋ᴇɢᴇɴᴅ 𝐑ᴀᴢᴀ
+`.trim()
+
+    await sock.sendMessage(botJid, { text: startMessage })
+    startMessageSent = true
+
+    console.log(`[OK] Active message sent to bot: ${botJid}`)
+  } catch (error) {
+    console.error('[!] Active message error:', error?.message || error)
+  }
 }
 
 async function startBot() {
-
-  if (
-    shuttingDown ||
-    starting
-  ) {
-    return
-  }
-
-  starting = true
+  if (reconnecting) return
+  reconnecting = true
 
   try {
+    // Restore session credentials from env variable
+    await initSession()
 
-    const {
-      state,
-      saveCreds
-    } =
-      await useMultiFileAuthState(
-        SESSION_DIR
-      )
+    const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR)
 
-    /*
-     * THIS is the only session check
-     * used to decide whether pairing
-     * is required.
-     */
-    const sessionRegistered =
-      state.creds.registered === true
+    sock = makeWASocket({
+      auth: state,
+      browser: Browsers.ubuntu('Chrome'),
+      logger,
+      markOnlineOnConnect: false,
+      syncFullHistory: false,
+      generateHighQualityLinkPreview: false,
+      badSessionDeleteHistory: true
+    })
 
-    if (sessionRegistered) {
+    sock.ev.on('creds.update', saveCreds)
 
-      console.log(
-        '[OK] Existing WhatsApp session detected.'
-      )
-
-      console.log(
-        '[OK] Pairing code will NOT be requested.'
-      )
-
-    } else {
-
-      console.log(
-        '[!] No registered WhatsApp session found.'
-      )
-
-      console.log(
-        '[!] A pairing code will be requested.'
-      )
-    }
-
-    /*
-     * Close old socket before creating
-     * a new connection.
-     */
-    if (sock) {
-
-      try {
-
-        sock.ev.removeAllListeners()
-
-        sock.ws?.close()
-
-      } catch {}
-    }
-
-    sock =
-      makeWASocket({
-
-        auth: state,
-
-        browser:
-          Browsers.ubuntu(
-            'Chrome'
-          ),
-
-        logger,
-
-        markOnlineOnConnect:
-          false,
-
-        syncFullHistory:
-          false,
-
-        generateHighQualityLinkPreview:
-          false,
-
-        badSessionDeleteHistory:
-          true,
-
-        connectTimeoutMs:
-          60000,
-
-        defaultQueryTimeoutMs:
-          60000,
-
-        keepAliveIntervalMs:
-          25000,
-
-        retryRequestDelayMs:
-          250,
-
-        fireInitQueries:
-          true,
-
-        emitOwnEvents:
-          false
-      })
-
-    /*
-     * Save WhatsApp credentials.
-     */
-    sock.ev.on(
-      'creds.update',
-      saveCreds
+    sock.ev.on('messages.upsert', (update) =>
+      handleMessages(update, sock, plugins, messageListeners)
     )
 
-    /*
-     * Messages.
-     */
-    sock.ev.on(
-      'messages.upsert',
-      update => {
+    sock.ev.on('group-participants.update', (update) =>
+      handleGroupParticipants(update, sock, groupListeners)
+    )
 
-        Promise.resolve(
-          handleMessages(
-            update,
-            sock,
-            plugins,
-            messageListeners
-          )
-        ).catch(
-          error => {
-
-            console.error(
-              '[Message Handler Error]:',
-              error?.message || error
-            )
-
-          }
-        )
+    sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
+      if (connection === 'connecting') {
+        console.log('[...] Connecting Raza-MD to WhatsApp...')
       }
-    )
 
-    /*
-     * Group participant events.
-     */
-    sock.ev.on(
-      'group-participants.update',
-      update => {
+      if (connection === 'open') {
+        reconnecting = false
 
-        Promise.resolve(
-          handleGroupParticipants(
-            update,
-            sock,
-            groupListeners
-          )
-        ).catch(
-          error => {
+        console.log('')
+        console.log('╭━━━〔 𝐑ᴀᴢᴀ-𝐌ᴅ 〕━━━┈⊷')
+        console.log('┃ 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ 𝐁ᴏᴛ')
+        console.log('┃ 𝐒ᴛᴀᴛᴜs : 𝐎ɴʟɪɴᴇ ✅')
+        console.log('┃ 𝐏ʀᴇғɪx : .')
+        console.log(`┃ 𝐂ᴏᴍᴍᴀɴᴅs : ${plugins.size}`)
+        console.log(`┃ 𝐏ʟᴜɢɪɴs : ${new Set([...plugins.values()]).size}`)
+        console.log('┃ 𝐏ᴏᴡᴇʀᴇᴅ 𝐁ʏ : 𝐋ᴇɢᴇɴᴅ 𝐑ᴀᴢᴀ')
+        console.log('╰━━━━━━━━━━━━━━━━━━━━┈⊷')
+        console.log('')
 
-            console.error(
-              '[Group Handler Error]:',
-              error?.message || error
-            )
-
-          }
-        )
+        await sendStartMessage()
       }
-    )
 
-    /*
-     * Connection state.
-     */
-    sock.ev.on(
-      'connection.update',
-      async ({
-        connection,
-        lastDisconnect
-      }) => {
+      if (connection === 'close') {
+        reconnecting = false
 
-        if (
-          connection === 'connecting'
-        ) {
+        const code = new Boom(lastDisconnect?.error)?.output?.statusCode
+        const loggedOut = code === DisconnectReason.loggedOut
 
-          console.log(
-            '[...] Connecting to WhatsApp...'
-          )
+        console.log(`[-] Connection closed. Code: ${code ?? 'unknown'}`)
+
+        if (loggedOut) {
+          console.log('[!] Session was logged out. Please update your SESSION_ID env variable.')
+          return
         }
 
-        if (
-          connection === 'open'
-        ) {
-
-          starting = false
-
-          console.log(
-            '\n[OK] Raza-MD connected successfully!'
-          )
-
-          console.log(
-            `Prefix active: "${PREFIX}"`
-          )
-
-          console.log(
-            `Active Commands: ${plugins.size}`
-          )
-
-          console.log(
-            `Group Listeners: ${groupListeners.length}`
-          )
-
-          console.log(
-            `Message Listeners: ${messageListeners.length}\n`
-          )
-
-          /*
-           * DO NOT reset pairingRequested.
-           *
-           * This prevents a second pairing
-           * code after reconnects.
-           */
-        }
-
-        if (
-          connection === 'close'
-        ) {
-
-          starting = false
-
-          const code =
-            new Boom(
-              lastDisconnect?.error
-            )
-              ?.output
-              ?.statusCode
-
-          const loggedOut =
-            code ===
-            DisconnectReason.loggedOut
-
-          const badSession =
-            code ===
-            DisconnectReason.badSession
-
-          console.log(
-            `[-] Connection closed. Code: ${
-              code ?? 'unknown'
-            }`
-          )
-
-          /*
-           * User explicitly logged out.
-           */
-          if (loggedOut) {
-
-            console.log(
-              '[!] WhatsApp session was logged out.'
-            )
-
-            console.log(
-              '[!] Delete the session folder and pair again.'
-            )
-
-            return
-          }
-
-          /*
-           * Invalid authentication session.
-           */
-          if (badSession) {
-
-            console.log(
-              '[!] WhatsApp session is invalid.'
-            )
-
-            console.log(
-              '[!] Delete the session folder and pair again.'
-            )
-
-            return
-          }
-
-          /*
-           * 515 can occur during the
-           * pairing/login connection flow.
-           *
-           * Reconnect, but NEVER request
-           * another pairing code.
-           */
-          if (
-            code === 515
-          ) {
-
-            console.log(
-              '[i] Connection closed with 515.'
-            )
-
-            console.log(
-              '[i] Reconnecting without a new pairing code...'
-            )
-          }
-
-          scheduleReconnect()
-        }
+        console.log('[...] Reconnecting in 3 seconds...')
+        setTimeout(startBot, 3000)
       }
-    )
-
-    starting = false
-
-    /*
-     * Pair ONLY if there was no registered
-     * session when startBot() began.
-     */
-    if (
-      !sessionRegistered &&
-      !pairingRequested
-    ) {
-
-      await requestPairingCode()
-    }
-
+    })
   } catch (error) {
-
-    starting = false
-
-    console.error(
-      '[Startup Error]:',
-      error?.message || error
-    )
-
-    scheduleReconnect()
+    reconnecting = false
+    console.error('Startup error:', error)
+    setTimeout(startBot, 5000)
   }
 }
-
-async function shutdown(signal) {
-
-  if (shuttingDown) {
-    return
-  }
-
-  shuttingDown = true
-
-  console.log(
-    `\n[!] ${signal} received. Shutting down...`
-  )
-
-  if (reconnectTimer) {
-
-    clearTimeout(
-      reconnectTimer
-    )
-
-    reconnectTimer = null
-  }
-
-  try {
-
-    if (sock) {
-
-      sock.ev.removeAllListeners()
-
-      try {
-        sock.ws?.close()
-      } catch {}
-
-      sock = null
-    }
-
-  } catch {}
-
-  process.exit(0)
-}
-
-process.once(
-  'SIGTERM',
-  () => shutdown('SIGTERM')
-)
-
-process.once(
-  'SIGINT',
-  () => shutdown('SIGINT')
-)
 
 await loadPlugins()
-
 await startBot()
