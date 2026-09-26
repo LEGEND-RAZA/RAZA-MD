@@ -1,16 +1,40 @@
 import { jidNormalizedUser } from '@whiskeysockets/baileys'
-import { getDb } from './database/index.js'
+
+import {
+  getDb,
+  saveDb
+} from './database/index.js'
 
 const OWNER_NUMBER =
   (process.env.OWNER_NUMBER || '').replace(/\D/g, '')
 
-export function getPrefix() {
-  const prefixDb = getDb('prefix.json', {
-    prefix: process.env.PREFIX || '!'
-  })
+let alwaysOnlineTimer = null
 
-  return prefixDb.prefix || process.env.PREFIX || '!'
+/*
+ * ==============================
+ * PREFIX
+ * ==============================
+ */
+
+export function getPrefix() {
+  const prefixDb =
+    getDb('prefix.json', {
+      prefix:
+        process.env.PREFIX || '.'
+    })
+
+  return (
+    prefixDb.prefix ||
+    process.env.PREFIX ||
+    '.'
+  )
 }
+
+/*
+ * ==============================
+ * JID HELPERS
+ * ==============================
+ */
 
 export function normalizeJid(jid) {
   if (!jid) return ''
@@ -41,30 +65,54 @@ export function isGroup(jid) {
   return String(jid).endsWith('@g.us')
 }
 
-export function checkIsOwner(message, sock) {
-  if (message?.key?.fromMe) return true
+/*
+ * ==============================
+ * OWNER
+ * ==============================
+ */
+
+export function checkIsOwner(
+  message,
+  sock
+) {
+  if (message?.key?.fromMe) {
+    return true
+  }
 
   const senderNum =
-    senderNumber(getSender(message))
+    senderNumber(
+      getSender(message)
+    )
 
   const botNum =
-    senderNumber(sock?.user?.id || '')
+    senderNumber(
+      sock?.user?.id || ''
+    )
 
   const hardcodedOwners = [
     '923280966780',
     '923197135780'
   ]
 
-  if (hardcodedOwners.includes(senderNum)) {
+  if (
+    hardcodedOwners.includes(
+      senderNum
+    )
+  ) {
     return true
   }
 
-  const sudoData = getDb('sudo.json', {
-    sudoNumbers: []
-  })
+  const sudoData =
+    getDb('sudo.json', {
+      sudoNumbers: []
+    })
 
   const dynamicSudos =
-    sudoData.sudoNumbers || []
+    Array.isArray(
+      sudoData.sudoNumbers
+    )
+      ? sudoData.sudoNumbers
+      : []
 
   if (
     senderNum &&
@@ -81,19 +129,34 @@ export function checkIsOwner(message, sock) {
     return true
   }
 
-  if (dynamicSudos.includes(senderNum)) {
+  if (
+    dynamicSudos.includes(
+      senderNum
+    )
+  ) {
     return true
   }
 
   return false
 }
 
+/*
+ * ==============================
+ * MESSAGE HELPERS
+ * ==============================
+ */
+
 export function unwrapMessage(message) {
-  let m = message?.message
+  let m =
+    message?.message
 
   if (!m) return null
 
-  for (let i = 0; i < 10; i++) {
+  for (
+    let i = 0;
+    i < 10;
+    i++
+  ) {
     const next =
       m?.ephemeralMessage?.message ||
       m?.viewOnceMessage?.message ||
@@ -110,7 +173,8 @@ export function unwrapMessage(message) {
 }
 
 export function getText(message) {
-  const m = unwrapMessage(message)
+  const m =
+    unwrapMessage(message)
 
   if (!m) return ''
 
@@ -124,8 +188,11 @@ export function getText(message) {
   ).trim()
 }
 
-export function getQuotedMessage(message) {
-  const m = unwrapMessage(message)
+export function getQuotedMessage(
+  message
+) {
+  const m =
+    unwrapMessage(message)
 
   if (!m) return null
 
@@ -137,8 +204,203 @@ export function getQuotedMessage(message) {
     m.documentMessage?.contextInfo ||
     m.stickerMessage?.contextInfo
 
-  return context?.quotedMessage || null
+  return (
+    context?.quotedMessage ||
+    null
+  )
 }
+
+/*
+ * ==============================
+ * SETTINGS
+ * ==============================
+ */
+
+function getSettings() {
+  return getDb(
+    'settings.json',
+    {
+      autoread: false,
+      alwaysonline: false
+    }
+  )
+}
+
+export function getAutoRead() {
+  const data =
+    getSettings()
+
+  return data.autoread === true
+}
+
+export function getAlwaysOnline() {
+  const data =
+    getSettings()
+
+  return data.alwaysonline === true
+}
+
+/*
+ * FIX:
+ * Save AutoRead setting to disk.
+ */
+
+export function setAutoRead(value) {
+  const data =
+    getSettings()
+
+  data.autoread =
+    value === true
+
+  saveDb(
+    'settings.json',
+    data
+  )
+
+  return data
+}
+
+/*
+ * FIX:
+ * Save Always Online setting to disk.
+ */
+
+export function setAlwaysOnline(value) {
+  const data =
+    getSettings()
+
+  data.alwaysonline =
+    value === true
+
+  saveDb(
+    'settings.json',
+    data
+  )
+
+  return data
+}
+
+/*
+ * ==============================
+ * ALWAYS ONLINE
+ * ==============================
+ */
+
+export async function startAlwaysOnline(
+  sock
+) {
+  if (!sock) return
+
+  /*
+   * Prevent duplicate timers.
+   */
+  if (alwaysOnlineTimer) {
+    clearInterval(
+      alwaysOnlineTimer
+    )
+
+    alwaysOnlineTimer =
+      null
+  }
+
+  /*
+   * If disabled, make the bot
+   * unavailable and don't start
+   * a timer.
+   */
+  if (
+    !getAlwaysOnline()
+  ) {
+    try {
+      await sock.sendPresenceUpdate(
+        'unavailable'
+      )
+    } catch {}
+
+    return
+  }
+
+  /*
+   * Set online immediately.
+   */
+  try {
+    await sock.sendPresenceUpdate(
+      'available'
+    )
+  } catch {}
+
+  /*
+   * Refresh presence every
+   * 20 seconds.
+   */
+  alwaysOnlineTimer =
+    setInterval(
+      async () => {
+        /*
+         * Setting was disabled
+         * while timer was running.
+         */
+        if (
+          !getAlwaysOnline()
+        ) {
+          await stopAlwaysOnline(
+            sock
+          )
+
+          return
+        }
+
+        try {
+          await sock.sendPresenceUpdate(
+            'available'
+          )
+        } catch {}
+      },
+      20000
+    )
+
+  /*
+   * Don't keep Node alive only
+   * because of this timer.
+   */
+  if (
+    typeof alwaysOnlineTimer
+      ?.unref === 'function'
+  ) {
+    alwaysOnlineTimer.unref()
+  }
+}
+
+/*
+ * Stop Always Online immediately.
+ */
+
+export async function stopAlwaysOnline(
+  sock
+) {
+  if (alwaysOnlineTimer) {
+    clearInterval(
+      alwaysOnlineTimer
+    )
+
+    alwaysOnlineTimer =
+      null
+  }
+
+  if (!sock) return
+
+  try {
+    await sock.sendPresenceUpdate(
+      'unavailable'
+    )
+  } catch {}
+}
+
+/*
+ * ==============================
+ * MESSAGE HANDLER
+ * ==============================
+ */
 
 export async function handleMessages(
   update,
@@ -146,71 +408,143 @@ export async function handleMessages(
   plugins,
   messageListeners
 ) {
-  if (update.type !== 'notify') return
+  if (
+    update.type !== 'notify'
+  ) {
+    return
+  }
 
-  for (const message of update.messages || []) {
+  /*
+   * Make sure Always Online
+   * is active if enabled.
+   */
+  if (
+    getAlwaysOnline() &&
+    !alwaysOnlineTimer
+  ) {
+    await startAlwaysOnline(
+      sock
+    )
+  }
+
+  for (
+    const message of
+    update.messages || []
+  ) {
     try {
-      if (!message?.message) continue
+      if (
+        !message?.message
+      ) {
+        continue
+      }
 
       const rawJid =
-        message.key?.remoteJid || ''
+        message.key?.remoteJid ||
+        ''
 
       /*
-       * Detect group-status / Updates posts.
+       * ==========================
+       * AUTO READ
+       * ==========================
        */
-      const isGroupStatusPost =
-        !!message.message?.groupStatusMessageV2
+
+      if (
+        getAutoRead() &&
+        message.key?.id
+      ) {
+        try {
+          await sock.readMessages([
+            message.key
+          ])
+        } catch {}
+      }
 
       /*
-       * Ignore normal WhatsApp status.
+       * ==========================
+       * GROUP STATUS
+       * ==========================
+       */
+
+      const isGroupStatusPost =
+        !!message
+          .message
+          ?.groupStatusMessageV2
+
+      /*
+       * Ignore normal WhatsApp
+       * status messages.
        */
       if (
-        rawJid === 'status@broadcast' &&
+        rawJid ===
+          'status@broadcast' &&
         !isGroupStatusPost
       ) {
         continue
       }
 
       const normalizedRemoteJid =
-        normalizeJid(rawJid)
+        normalizeJid(
+          rawJid
+        )
 
       const text =
-        getText(message)
+        getText(
+          message
+        )
 
       const isGroupChat =
-        isGroup(normalizedRemoteJid) ||
+        isGroup(
+          normalizedRemoteJid
+        ) ||
         isGroupStatusPost
 
       const isOwner =
-        checkIsOwner(message, sock)
+        checkIsOwner(
+          message,
+          sock
+        )
 
       const activePrefix =
         getPrefix()
 
       /*
-       * PASSIVE MESSAGE LISTENERS
+       * ==========================
+       * PASSIVE LISTENERS
+       * ==========================
        */
-      for (const listener of messageListeners) {
+
+      for (
+        const listener of
+        messageListeners
+      ) {
         try {
-          if (typeof listener.on === 'function') {
+          if (
+            typeof listener.on ===
+            'function'
+          ) {
             await listener.on({
               sock,
               message,
               text,
               isOwner,
-              isGroup: isGroupChat,
-              isStatus: isGroupStatusPost
+              isGroup:
+                isGroupChat,
+              isStatus:
+                isGroupStatusPost
             })
           } else if (
-            typeof listener.run === 'function'
+            typeof listener.run ===
+            'function'
           ) {
             await listener.run({
               sock,
               message,
               text,
               isOwner,
-              isGroup: isGroupChat,
-              isStatus: isGroupStatusPost
+              isGroup:
+                isGroupChat,
+              isStatus:
+                isGroupStatusPost
             })
           }
         } catch (err) {
@@ -222,18 +556,26 @@ export async function handleMessages(
       }
 
       /*
-       * Group status posts are for listeners only.
+       * Group status posts are
+       * listener-only.
        */
-      if (isGroupStatusPost) {
+      if (
+        isGroupStatusPost
+      ) {
         continue
       }
 
       /*
-       * Ignore normal messages.
+       * ==========================
+       * COMMAND CHECK
+       * ==========================
        */
+
       if (
         !text ||
-        !text.startsWith(activePrefix)
+        !text.startsWith(
+          activePrefix
+        )
       ) {
         continue
       }
@@ -241,43 +583,66 @@ export async function handleMessages(
       /*
        * Owner / sudo only.
        */
-      if (!isOwner) continue
+      if (!isOwner) {
+        continue
+      }
 
       const body =
         text
-          .slice(activePrefix.length)
+          .slice(
+            activePrefix.length
+          )
           .trim()
 
-      if (!body) continue
+      if (!body) {
+        continue
+      }
 
       const parts =
         body.split(/\s+/)
 
       const command =
-        parts.shift().toLowerCase()
+        parts
+          .shift()
+          .toLowerCase()
 
-      const args = parts
+      const args =
+        parts
 
       const plugin =
-        plugins.get(command)
+        plugins.get(
+          command
+        )
 
       /*
-       * Unknown commands don't react.
+       * Unknown commands
+       * don't react.
        */
-      if (!plugin) continue
+      if (!plugin) {
+        continue
+      }
 
       console.log(
-        `⚡ Executing: ${activePrefix}${command} from ${senderNumber(
-          getSender(message)
-        )}`
+        `⚡ Executing: ${
+          activePrefix
+        }${command} from ${
+          senderNumber(
+            getSender(
+              message
+            )
+          )
+        }`
       )
 
       /*
-       * React to every valid command.
+       * ==========================
+       * COMMAND REACTION
+       * ==========================
        */
+
       try {
         await sock.sendMessage(
-          message.key.remoteJid,
+          rawJid,
           {
             react: {
               text: '⏳',
@@ -286,41 +651,49 @@ export async function handleMessages(
           }
         )
 
-        /*
-         * Remove reaction after 2 seconds.
-         */
-        setTimeout(async () => {
-          try {
-            await sock.sendMessage(
-              message.key.remoteJid,
-              {
-                react: {
-                  text: '',
-                  key: message.key
+        setTimeout(
+          async () => {
+            try {
+              await sock.sendMessage(
+                rawJid,
+                {
+                  react: {
+                    text: '',
+                    key:
+                      message.key
+                  }
                 }
-              }
-            )
-          } catch {}
-        }, 1000)
-
+              )
+            } catch {}
+          },
+          1000
+        )
       } catch {}
 
       /*
-       * Execute plugin.
+       * ==========================
+       * EXECUTE PLUGIN
+       * ==========================
        */
+
       const quotedMessage =
-        getQuotedMessage(message)
+        getQuotedMessage(
+          message
+        )
 
       await plugin.run({
         sock,
         message,
         quotedMessage,
         args,
-        text: args.join(' '),
+        text:
+          args.join(' '),
         command,
-        prefix: activePrefix,
+        prefix:
+          activePrefix,
         isOwner,
-        isGroup: isGroupChat,
+        isGroup:
+          isGroupChat,
         plugins
       })
 
@@ -333,6 +706,12 @@ export async function handleMessages(
   }
 }
 
+/*
+ * ==============================
+ * GROUP PARTICIPANTS
+ * ==============================
+ */
+
 export async function handleGroupParticipants(
   update,
   sock,
@@ -340,16 +719,19 @@ export async function handleGroupParticipants(
 ) {
   if (!update) return
 
-  for (const listener of groupListeners) {
+  for (
+    const listener of
+    groupListeners
+  ) {
     try {
       await listener.run({
         sock,
         update
       })
-    } catch (e) {
+    } catch (error) {
       console.error(
         '[Group Listener Error]:',
-        e
+        error
       )
     }
   }
