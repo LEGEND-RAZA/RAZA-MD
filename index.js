@@ -1,7 +1,8 @@
 import makeWASocket, {
   Browsers,
   DisconnectReason,
-  useMultiFileAuthState
+  useMultiFileAuthState,
+  jidNormalizedUser
 } from '@whiskeysockets/baileys'
 
 import { Boom } from '@hapi/boom'
@@ -44,6 +45,7 @@ const logger = pino({
 
 let sock = null
 let reconnecting = false
+let activeMessageSent = false
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -62,6 +64,71 @@ function decodeBase64(value) {
     value,
     'base64'
   )
+}
+
+async function sendActiveMessage() {
+  if (
+    activeMessageSent ||
+    !sock?.user?.id
+  ) {
+    return
+  }
+
+  try {
+    const botJid =
+      jidNormalizedUser(
+        sock.user.id
+      )
+
+    if (!botJid) {
+      console.error(
+        '[WA] Could not determine bot JID.'
+      )
+
+      return
+    }
+
+    const activeMessage = `
+𝐇ᴇʟʟᴏ 𝐓ʜᴇʀᴇ 𝐑ᴀᴢᴀ-𝐌ᴅ 𝐔ꜱᴇʀ! 👋
+
+╭━━━〔 𝐑ᴀᴢᴀ-𝐌ᴅ 〕━━━┈⊷
+┃
+┃ 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ 𝐁ᴏᴛ
+┃ 𝐒ᴛᴀᴛᴜs : 𝐎ɴʟɪɴᴇ ✅
+┃ 𝐏ʀᴇғɪx : ${process.env.PREFIX || '.'}
+┃ 𝐂ᴏᴍᴍᴀɴᴅs : ${plugins.size}
+┃ 𝐌ᴇssᴀɢᴇ 𝐋ɪsᴛᴇɴᴇʀs : ${messageListeners.length}
+┃ 𝐆ʀᴏᴜᴘ 𝐋ɪsᴛᴇɴᴇʀs : ${groupListeners.length}
+┃
+╰━━━━━━━━━━━━━━━━━━━━┈⊷
+
+> 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ 𝐁ᴏᴛ 𝐋ᴏᴀᴅᴇᴅ ✅
+
+𝐓ʜᴀɴᴋs 𝐅ᴏʀ 𝐔sɪɴɢ 𝐑ᴀᴢᴀ-𝐌ᴅ 💗
+
+𝐏ᴏᴡᴇʀᴇᴅ 𝐁ʏ 𝐋ᴇɢᴇɴᴅ 𝐑ᴀᴢᴀ
+`.trim()
+
+    await sock.sendMessage(
+      botJid,
+      {
+        text: activeMessage
+      }
+    )
+
+    activeMessageSent = true
+
+    console.log(
+      `[WA] Active message sent to bot: ${botJid}`
+    )
+
+  } catch (error) {
+    console.error(
+      '[WA] Active message error:',
+      error?.message ||
+        error
+    )
+  }
 }
 
 async function restoreRemoteSession() {
@@ -292,6 +359,8 @@ async function connect() {
                 error
             )
           }
+
+          await sendActiveMessage()
 
           return
         }
