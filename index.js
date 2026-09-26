@@ -1,26 +1,29 @@
-import makeWASocket, {
+import fs from 'node:fs'
+import path from 'node:path'
+import readline from 'node:readline'
+import { pathToFileURL } from 'node:url'
+
+import {
+  makeWASocket,
   Browsers,
   DisconnectReason,
-  useMultiFileAuthState,
-  jidNormalizedUser
+  useMultiFileAuthState
 } from '@whiskeysockets/baileys'
 
-import P from 'pino'
 import { Boom } from '@hapi/boom'
-import path from 'node:path'
-import fs from 'node:fs'
+import P from 'pino'
+
+import {
+  loadPlugins,
+  plugins,
+  messageListeners,
+  groupListeners
+} from './plugins.js'
 
 import {
   handleMessages,
   handleGroupParticipants
 } from './handler.js'
-
-import {
-  plugins,
-  messageListeners,
-  groupListeners,
-  loadPlugins
-} from './lib/plugin-loader.js'
 
 const ROOT =
   process.cwd()
@@ -31,489 +34,722 @@ const SESSION_DIR =
     'session'
   )
 
+const PLUGIN_DIR =
+  path.join(
+    ROOT,
+    'plugins'
+  )
+
 const PREFIX =
   process.env.PREFIX || '.'
 
+const SESSION_ID =
+  String(
+    process.env.SESSION_ID || ''
+  ).trim()
+
+const PAIR_SERVER_URL =
+  String(
+    process.env.PAIR_SERVER_URL || ''
+  ).replace(
+    /\/+$/,
+    ''
+  )
+
+const OWNER_NUMBER =
+  String(
+    process.env.OWNER_NUMBER || ''
+  )
+    .replace(
+      /\D/g,
+      ''
+    )
+
 const logger =
   P({
-    level: 'silent'
+    level:
+      process.env.LOG_LEVEL ||
+      'silent'
   })
 
-let sock
+let sock = null
 let reconnecting = false
-let startMessageSent = false
+let starting = false
 
-/*
- * ==============================
- * SESSION RESTORE
- * ==============================
- */
+let restoredRemoteSession =
+  false
 
-async function initSession() {
-  const credsPath =
-    path.join(
-      SESSION_DIR,
-      'creds.json'
-    )
+function delay(ms) {
+  return new Promise(
+    resolve =>
+      setTimeout(
+        resolve,
+        ms
+      )
+  )
+}
 
+function ensureDirectories() {
   if (
-    fs.existsSync(credsPath)
-  ) {
-    console.log(
-      '[+] Existing session found.'
+    !fs.existsSync(
+      SESSION_DIR
     )
-    return
-  }
-
-  const sessionId =
-    process.env.SESSION_ID
-
-  if (
-    !sessionId
   ) {
-    console.error(
-      '[-] Error: SESSION_ID environment variable is missing!'
-    )
-    return
-  }
-
-  try {
-    await fs.promises.mkdir(
+    fs.mkdirSync(
       SESSION_DIR,
       {
-        recursive: true
+        recursive:
+          true
       }
     )
+  }
 
-    let code =
-      sessionId.trim()
-
-    /*
-     * Remove old session prefixes.
-     */
-    code =
-      code.replace(
-        /^(levanter_|session_)/i,
-        ''
-      )
-
-    /*
-     * ==============================
-     * RAZA~ MULTI-FILE SESSION
-     * ==============================
-     */
-
-    if (
-      code.startsWith(
-        'RAZA~'
-      )
-    ) {
-      console.log(
-        '[...] RAZA session detected. Restoring session files...'
-      )
-
-      const encoded =
-        code.slice(5)
-
-      let decoded
-
-      try {
-        decoded =
-          Buffer.from(
-            encoded,
-            'base64url'
-          ).toString(
-            'utf8'
-          )
-      } catch {
-        throw new Error(
-          'Invalid RAZA session encoding.'
-        )
-      }
-
-      let sessionData
-
-      try {
-        sessionData =
-          JSON.parse(
-            decoded
-          )
-      } catch {
-        throw new Error(
-          'Invalid RAZA session JSON.'
-        )
-      }
-
-      if (
-        !sessionData ||
-        typeof sessionData !== 'object'
-      ) {
-        throw new Error(
-          'Invalid RAZA session data.'
-        )
-      }
-
-      if (
-        sessionData.version !== 1
-      ) {
-        throw new Error(
-          'Unsupported RAZA session version.'
-        )
-      }
-
-      if (
-        !sessionData.files ||
-        typeof sessionData.files !== 'object'
-      ) {
-        throw new Error(
-          'RAZA session contains no auth files.'
-        )
-      }
-
-      let restored =
-        0
-
-      for (
-        const [
-          name,
-          value
-        ] of Object.entries(
-          sessionData.files
-        )
-      ) {
-        /*
-         * Only allow simple filenames.
-         * Prevents path traversal.
-         */
-        if (
-          path.basename(name) !==
-          name
-        ) {
-          continue
-        }
-
-        if (
-          typeof value !==
-          'string'
-        ) {
-          continue
-        }
-
-        const filePath =
-          path.join(
-            SESSION_DIR,
-            name
-          )
-
-        let buffer
-
-        try {
-          buffer =
-            Buffer.from(
-              value,
-              'base64'
-            )
-        } catch {
-          continue
-        }
-
-        await fs.promises.writeFile(
-          filePath,
-          buffer
-        )
-
-        restored++
-      }
-
-      if (
-        restored === 0
-      ) {
-        throw new Error(
-          'No valid files were restored from RAZA session.'
-        )
-      }
-
-      if (
-        !fs.existsSync(
-          credsPath
-        )
-      ) {
-        throw new Error(
-          'RAZA session restored, but creds.json is missing.'
-        )
-      }
-
-      console.log(
-        `[+] RAZA session restored successfully: ${restored} files.`
-      )
-
-      return
-    }
-
-    /*
-     * ==============================
-     * DIRECT JSON SESSION
-     * ==============================
-     */
-
-    let sessionData = ''
-
-    if (
-      code.startsWith('{')
-    ) {
-      sessionData =
-        code
-    }
-
-    /*
-     * ==============================
-     * BASE64 JSON SESSION
-     * ==============================
-     */
-
-    if (
-      !sessionData
-    ) {
-      try {
-        const decoded =
-          Buffer.from(
-            code,
-            'base64'
-          ).toString(
-            'utf8'
-          ).trim()
-
-        if (
-          decoded.startsWith('{')
-        ) {
-          sessionData =
-            decoded
-        }
-      } catch {}
-    }
-
-    /*
-     * ==============================
-     * DIRECT URL SESSION
-     * ==============================
-     */
-
-    if (
-      !sessionData &&
-      code.includes('://')
-    ) {
-      const response =
-        await fetch(code)
-
-      if (
-        response.ok
-      ) {
-        sessionData =
-          (
-            await response.text()
-          ).trim()
-      }
-    }
-
-    /*
-     * ==============================
-     * REMOTE SESSION ENDPOINTS
-     * ==============================
-     */
-
-    if (
-      !sessionData
-    ) {
-      const endpoints = [
-        `https://paste.c-s.in/raw/${code}`,
-        `https://pastebin.com/raw/${code}`,
-        `https://session.levanter.site/session?id=${code}`
-      ]
-
-      for (
-        const url of endpoints
-      ) {
-        try {
-          const response =
-            await fetch(url)
-
-          if (
-            !response.ok
-          ) {
-            continue
-          }
-
-          const text =
-            (
-              await response.text()
-            ).trim()
-
-          if (
-            text.startsWith('{')
-          ) {
-            sessionData =
-              text
-
-            break
-          }
-        } catch {}
-      }
-    }
-
-    if (
-      !sessionData
-    ) {
-      throw new Error(
-        'Invalid or expired SESSION_ID. Could not fetch valid credentials.'
-      )
-    }
-
-    /*
-     * Validate JSON.
-     */
-    let parsed
-
-    try {
-      parsed =
-        JSON.parse(
-          sessionData
-        )
-    } catch {
-      throw new Error(
-        'SESSION_ID contains invalid JSON.'
-      )
-    }
-
-    /*
-     * Save old-style creds.json.
-     */
-    await fs.promises.writeFile(
-      credsPath,
-      JSON.stringify(
-        parsed
-      ),
-      'utf8'
+  if (
+    !fs.existsSync(
+      PLUGIN_DIR
     )
-
-    console.log(
-      '[+] SESSION_ID successfully loaded and restored.'
-    )
-  } catch (error) {
-    console.error(
-      '[-] Failed to restore SESSION_ID:',
-      error?.message ||
-        error
+  ) {
+    fs.mkdirSync(
+      PLUGIN_DIR,
+      {
+        recursive:
+          true
+      }
     )
   }
 }
 
-/*
- * ==============================
- * START MESSAGE
- * ==============================
- */
+function isShortSession(
+  value
+) {
+  return /^RAZA_[A-Za-z0-9_-]{10,100}$/
+    .test(
+      String(
+        value || ''
+      ).trim()
+    )
+}
+
+function isLegacySession(
+  value
+) {
+  return String(
+    value || ''
+  )
+    .trim()
+    .startsWith(
+      'RAZA~'
+    )
+}
+
+function safeFileName(
+  name
+) {
+  if (
+    typeof name !==
+    'string'
+  ) {
+    return false
+  }
+
+  if (
+    !name ||
+    path.basename(
+      name
+    ) !== name
+  ) {
+    return false
+  }
+
+  if (
+    name.includes(
+      '..'
+    ) ||
+    name.includes(
+      '/'
+    ) ||
+    name.includes(
+      '\\'
+    )
+  ) {
+    return false
+  }
+
+  return true
+}
+
+function decodeBase64(
+  value
+) {
+  if (
+    typeof value !==
+    'string'
+  ) {
+    throw new Error(
+      'Invalid session file data'
+    )
+  }
+
+  return Buffer.from(
+    value,
+    'base64'
+  )
+}
+
+async function restoreRemoteSession(
+  token
+) {
+  if (
+    !PAIR_SERVER_URL
+  ) {
+    throw new Error(
+      'PAIR_SERVER_URL is missing'
+    )
+  }
+
+  const url =
+    `${PAIR_SERVER_URL}/api/session/${encodeURIComponent(token)}`
+
+  console.log(
+    '[SESSION] Fetching remote session...'
+  )
+
+  const response =
+    await fetch(
+      url,
+      {
+        method:
+          'GET',
+
+        headers: {
+          Accept:
+            'application/json'
+        },
+
+        signal:
+          AbortSignal.timeout(
+            60000
+          )
+      }
+    )
+
+  if (
+    !response.ok
+  ) {
+    let message =
+      `Session server returned HTTP ${response.status}`
+
+    try {
+      const data =
+        await response.json()
+
+      if (
+        data?.error
+      ) {
+        message =
+          data.error
+      }
+    } catch {}
+
+    throw new Error(
+      message
+    )
+  }
+
+  const data =
+    await response.json()
+
+  if (
+    !data?.success
+  ) {
+    throw new Error(
+      data?.error ||
+      'Remote session request failed'
+    )
+  }
+
+  if (
+    !data?.files ||
+    typeof data.files !==
+      'object'
+  ) {
+    throw new Error(
+      'Remote session contains no auth files'
+    )
+  }
+
+  const names =
+    Object.keys(
+      data.files
+    )
+
+  if (
+    !names.length
+  ) {
+    throw new Error(
+      'Remote session is empty'
+    )
+  }
+
+  /*
+   * Clear old session files
+   * before restoring the new one.
+   */
+
+  fs.mkdirSync(
+    SESSION_DIR,
+    {
+      recursive:
+        true
+    }
+  )
+
+  for (
+    const name of names
+  ) {
+    if (
+      !safeFileName(
+        name
+      )
+    ) {
+      throw new Error(
+        `Unsafe session filename: ${name}`
+      )
+    }
+
+    const buffer =
+      decodeBase64(
+        data.files[name]
+      )
+
+    fs.writeFileSync(
+      path.join(
+        SESSION_DIR,
+        name
+      ),
+      buffer
+    )
+  }
+
+  restoredRemoteSession =
+    true
+
+  console.log(
+    `[SESSION] Restored ${names.length} auth files.`
+  )
+}
+
+function restoreLegacySession(
+  session
+) {
+  /*
+   * Supports the old:
+   *
+   * RAZA~base64-json
+   *
+   * format.
+   */
+
+  const encoded =
+    String(
+      session
+    ).slice(
+      5
+    )
+
+  if (
+    !encoded
+  ) {
+    throw new Error(
+      'Legacy RAZA session is empty'
+    )
+  }
+
+  let json
+
+  try {
+    json =
+      Buffer.from(
+        encoded,
+        'base64url'
+      ).toString(
+        'utf8'
+      )
+  } catch {
+    json =
+      Buffer.from(
+        encoded,
+        'base64'
+      ).toString(
+        'utf8'
+      )
+  }
+
+  const data =
+    JSON.parse(
+      json
+    )
+
+  if (
+    !data ||
+    typeof data !==
+      'object'
+  ) {
+    throw new Error(
+      'Invalid legacy session'
+    )
+  }
+
+  const files =
+    data.files ||
+    data.auth ||
+    data
+
+  if (
+    !files ||
+    typeof files !==
+      'object'
+  ) {
+    throw new Error(
+      'Legacy session contains no files'
+    )
+  }
+
+  fs.mkdirSync(
+    SESSION_DIR,
+    {
+      recursive:
+        true
+    }
+  )
+
+  let count = 0
+
+  for (
+    const [
+      name,
+      value
+    ] of Object.entries(
+      files
+    )
+  ) {
+    if (
+      !safeFileName(
+        name
+      )
+    ) {
+      continue
+    }
+
+    let buffer
+
+    if (
+      typeof value ===
+      'string'
+    ) {
+      buffer =
+        Buffer.from(
+          value,
+          'base64'
+        )
+    } else {
+      buffer =
+        Buffer.from(
+          JSON.stringify(
+            value
+          )
+        )
+    }
+
+    fs.writeFileSync(
+      path.join(
+        SESSION_DIR,
+        name
+      ),
+      buffer
+    )
+
+    count++
+  }
+
+  if (
+    !count
+  ) {
+    throw new Error(
+      'No valid files found in legacy session'
+    )
+  }
+
+  console.log(
+    `[SESSION] Restored ${count} legacy auth files.`
+  )
+}
+
+async function prepareSession() {
+  ensureDirectories()
+
+  /*
+   * If a local auth state already exists,
+   * use it first.
+   */
+
+  const localFiles =
+    fs.readdirSync(
+      SESSION_DIR
+    )
+
+  const hasLocalAuth =
+    localFiles.some(
+      file =>
+        file ===
+          'creds.json' ||
+        file.startsWith(
+          'app-state-sync-key'
+        ) ||
+        file.startsWith(
+          'pre-key'
+        )
+    )
+
+  /*
+   * RAZA_xxx = fetch from pairing server.
+   */
+
+  if (
+    isShortSession(
+      SESSION_ID
+    )
+  ) {
+    /*
+     * Don't download it again if
+     * the local session is already
+     * complete.
+     */
+
+    if (
+      !hasLocalAuth
+    ) {
+      await restoreRemoteSession(
+        SESSION_ID
+      )
+    } else {
+      console.log(
+        '[SESSION] Local session found.'
+      )
+
+      console.log(
+        '[SESSION] Using local auth state.'
+      )
+    }
+
+    return
+  }
+
+  /*
+   * Old RAZA~ session support.
+   */
+
+  if (
+    isLegacySession(
+      SESSION_ID
+    ) &&
+    !hasLocalAuth
+  ) {
+    restoreLegacySession(
+      SESSION_ID
+    )
+
+    return
+  }
+
+  /*
+   * Empty SESSION_ID:
+   * use local session or pairing.
+   */
+
+  if (
+    SESSION_ID
+  ) {
+    console.log(
+      '[SESSION] Unknown SESSION_ID format.'
+    )
+
+    console.log(
+      '[SESSION] Using local auth state if available.'
+    )
+  }
+
+  if (
+    hasLocalAuth
+  ) {
+    console.log(
+      '[SESSION] Local auth state found.'
+    )
+  } else {
+    console.log(
+      '[SESSION] No existing session found.'
+    )
+  }
+}
+
+function askPairingNumber() {
+  return new Promise(
+    resolve => {
+      const rl =
+        readline.createInterface({
+          input:
+            process.stdin,
+
+          output:
+            process.stdout
+        })
+
+      rl.question(
+        '\nEnter WhatsApp number with country code: ',
+        answer => {
+          rl.close()
+
+          resolve(
+            String(
+              answer || ''
+            )
+              .replace(
+                /\D/g,
+                ''
+              )
+          )
+        }
+      )
+    }
+  )
+}
+
+async function ensurePairing(
+  state,
+  saveCreds
+) {
+  if (
+    state.creds.registered
+  ) {
+    return
+  }
+
+  let number =
+    String(
+      process.env.PAIRING_NUMBER ||
+        ''
+    ).replace(
+      /\D/g,
+      ''
+    )
+
+  if (
+    !number
+  ) {
+    number =
+      await askPairingNumber()
+  }
+
+  if (
+    number.length < 7 ||
+    number.length > 15
+  ) {
+    throw new Error(
+      'Invalid WhatsApp number'
+    )
+  }
+
+  console.log(
+    '\n[PAIR] Requesting pairing code...'
+  )
+
+  await delay(
+    2000
+  )
+
+  try {
+    const code =
+      await sock.requestPairingCode(
+        number
+      )
+
+    console.log(
+      `\n[PAIRING CODE] ${code}`
+    )
+
+    console.log(
+      '[PAIR] Open WhatsApp > Linked devices > Link a device > Link with phone number'
+    )
+
+    /*
+     * Keep credentials listener alive.
+     */
+
+    sock.ev.on(
+      'creds.update',
+      saveCreds
+    )
+  } catch (error) {
+    console.error(
+      '[PAIR ERROR]',
+      error?.message ||
+        error
+    )
+
+    throw error
+  }
+}
 
 async function sendStartMessage() {
   if (
-    !sock?.user?.id
+    !sock?.user
   ) {
-    console.log(
-      '[!] Bot JID not available.'
+    return
+  }
+
+  const jid =
+    sock.user.id
+
+  const message =
+    [
+      '𝐇ᴇʟʟᴏ 𝐓ʜᴇʀᴇ 𝐑ᴀᴢᴀ-𝐌ᴅ 𝐔ꜱᴇʀ!',
+      '',
+      '> 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛꜱᴀᴘᴘ 𝐁ᴏᴛ 𝐋ᴏᴀᴅᴇᴅ',
+      '',
+      `> 𝐏ʀᴇғɪx : [${PREFIX}]`,
+      `> 𝐌ᴏᴅᴇ : ${process.env.MODE || 'private'}`,
+      `> 𝐑ᴀᴍ : ${Math.round(process.memoryUsage().rss / 1024 / 1024)} MB`,
+      '',
+      '𝐓ʜᴀɴᴋꜱ 𝐅ᴏʀ 𝐔ꜱɪɴɢ 𝐑ᴀᴢᴀ-𝐌ᴅ',
+      '𝐏ᴏᴡᴇʀᴇᴅ 𝐁ʏ 𝐋ᴇɢᴇɴᴅ 𝐑ᴀᴢᴀ'
+    ].join(
+      '\n'
     )
-
-    return
-  }
-
-  if (
-    startMessageSent
-  ) {
-    return
-  }
 
   try {
-    const botJid =
-      jidNormalizedUser(
-        sock.user.id
-      )
-
-    if (
-      !botJid
-    ) {
-      console.log(
-        '[!] Could not determine bot JID.'
-      )
-
-      return
-    }
-
-    const startMessage = `
-𝐇ᴇʟʟᴏ 𝐓ʜᴇʀᴇ 𝐑ᴀᴢᴀ-𝐌ᴅ 𝐔ꜱᴇʀ! 👋
-
-╭━━━〔 𝐑ᴀᴢᴀ-𝐌ᴅ 〕━━━┈⊷
-┃
-┃ 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ 𝐁ᴏᴛ
-┃ 𝐒ᴛᴀᴛᴜs : 𝐎ɴʟɪɴᴇ ✅
-┃ 𝐏ʀᴇғɪx : ${PREFIX}
-┃ 𝐂ᴏᴍᴍᴀɴᴅs : ${plugins.size}
-┃ 𝐏ʟᴜɢɪɴs : ${new Set([...plugins.values()]).size}
-┃
-╰━━━━━━━━━━━━━━━━━━━━┈⊷
-
-> 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ 𝐁ᴏᴛ 𝐋ᴏᴀᴅᴇᴅ ✅
-
-𝐓ʜᴀɴᴋs 𝐅ᴏʀ 𝐔sɪɴɢ 𝐑ᴀᴢᴀ-𝐌ᴅ 💗
-
-𝐏ᴏᴡᴇʀᴇ𝐷 𝐁ʏ 𝐋ᴇɢᴇɴᴅ 𝐑ᴀᴢᴀ
-`.trim()
-
     await sock.sendMessage(
-      botJid,
+      jid,
       {
         text:
-          startMessage
+          message
       }
     )
-
-    startMessageSent =
-      true
-
-    console.log(
-      `[OK] Active message sent to bot: ${botJid}`
-    )
-  } catch (error) {
-    console.error(
-      '[!] Active message error:',
-      error?.message ||
-        error
-    )
-  }
+  } catch {}
 }
-
-/*
- * ==============================
- * START BOT
- * ==============================
- */
 
 async function startBot() {
   if (
-    reconnecting
+    starting
   ) {
     return
   }
 
-  reconnecting =
+  starting =
     true
 
   try {
-    /*
-     * Restore SESSION_ID first.
-     */
-    await initSession()
+    await prepareSession()
 
-    /*
-     * Load multi-file authentication.
-     */
     const {
       state,
       saveCreds
@@ -532,19 +768,20 @@ async function startBot() {
             'Chrome'
           ),
 
+        printQRInTerminal:
+          false,
+
         logger,
 
         markOnlineOnConnect:
-          false,
+          process.env.ALWAYS_ONLINE ===
+          'true',
 
         syncFullHistory:
           false,
 
         generateHighQualityLinkPreview:
           false,
-
-        badSessionDeleteHistory:
-          true,
 
         connectTimeoutMs:
           60000,
@@ -553,7 +790,15 @@ async function startBot() {
           60000,
 
         keepAliveIntervalMs:
-          30000
+          30000,
+
+        fireInitQueries:
+          true,
+
+        shouldIgnoreJid:
+          jid =>
+            jid ===
+            'status@broadcast'
       })
 
     sock.ev.on(
@@ -562,38 +807,19 @@ async function startBot() {
     )
 
     sock.ev.on(
-      'messages.upsert',
-      update =>
-        handleMessages(
-          update,
-          sock,
-          plugins,
-          messageListeners
-        )
-    )
-
-    sock.ev.on(
-      'group-participants.update',
-      update =>
-        handleGroupParticipants(
-          update,
-          sock,
-          groupListeners
-        )
-    )
-
-    sock.ev.on(
       'connection.update',
-      async ({
-        connection,
-        lastDisconnect
-      }) => {
+      async update => {
+        const {
+          connection,
+          lastDisconnect
+        } = update
+
         if (
           connection ===
           'connecting'
         ) {
           console.log(
-            '[...] Connecting Raza-MD to WhatsApp...'
+            '[WHATSAPP] Connecting...'
           )
         }
 
@@ -601,113 +827,340 @@ async function startBot() {
           connection ===
           'open'
         ) {
+          console.log(
+            '\n[WHATSAPP] Connected successfully.'
+          )
+
+          console.log(
+            `[WHATSAPP] ${sock.user?.id || 'unknown'}`
+          )
+
           reconnecting =
             false
 
-          console.log('')
+          starting =
+            false
 
-          console.log(
-            '╭━━━〔 𝐑ᴀᴢᴀ-𝐌ᴅ 〕━━━┈⊷'
-          )
+          /*
+           * Send startup message
+           * only for an already
+           * authenticated session.
+           */
 
-          console.log(
-            '┃ 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ 𝐁ᴏᴛ'
-          )
-
-          console.log(
-            '┃ 𝐒ᴛᴀᴛᴜs : 𝐎ɴʟɪɴᴇ ✅'
-          )
-
-          console.log(
-            `┃ 𝐏ʀᴇғɪx : ${PREFIX}`
-          )
-
-          console.log(
-            `┃ 𝐂ᴏᴍᴍᴀɴᴅs : ${plugins.size}`
-          )
-
-          console.log(
-            `┃ 𝐏ʟᴜɢɪɴs : ${new Set([...plugins.values()]).size}`
-          )
-
-          console.log(
-            '┃ 𝐏ᴏᴡᴇʀᴇᴅ 𝐁ʏ : 𝐋ᴇɢᴇɴᴅ 𝐑ᴀᴢᴀ'
-          )
-
-          console.log(
-            '╰━━━━━━━━━━━━━━━━━━━━┈⊷'
-          )
-
-          console.log('')
-
-          await sendStartMessage()
+          if (
+            state.creds.registered
+          ) {
+            await sendStartMessage()
+          }
         }
 
         if (
           connection ===
           'close'
         ) {
-          reconnecting =
-            false
-
-          const code =
+          const statusCode =
             new Boom(
               lastDisconnect?.error
             )
               ?.output
               ?.statusCode
 
-          const loggedOut =
-            code ===
-            DisconnectReason.loggedOut
-
           console.log(
-            `[-] Connection closed. Code: ${code ?? 'unknown'}`
+            `[WHATSAPP] Connection closed: ${
+              statusCode ||
+              'unknown'
+            }`
           )
 
+          starting =
+            false
+
           if (
-            loggedOut
+            statusCode ===
+            DisconnectReason.loggedOut
           ) {
             console.log(
-              '[!] Session was logged out. Please update your SESSION_ID env variable.'
+              '[WHATSAPP] Session logged out.'
             )
 
             return
           }
 
-          console.log(
-            '[...] Reconnecting in 3 seconds...'
-          )
+          if (
+            statusCode ===
+            DisconnectReason.badSession
+          ) {
+            console.log(
+              '[WHATSAPP] Bad session.'
+            )
 
-          setTimeout(
-            startBot,
-            3000
+            return
+          }
+
+          if (
+            !reconnecting
+          ) {
+            reconnecting =
+              true
+
+            console.log(
+              '[WHATSAPP] Reconnecting in 3 seconds...'
+            )
+
+            setTimeout(
+              () => {
+                startBot().catch(
+                  error => {
+                    console.error(
+                      '[RECONNECT ERROR]',
+                      error?.message ||
+                        error
+                    )
+                  }
+                )
+              },
+              3000
+            )
+          }
+        }
+      }
+    )
+
+    /*
+     * ==========================
+     * MESSAGE HANDLER
+     * ==========================
+     */
+
+    sock.ev.on(
+      'messages.upsert',
+      async ({
+        messages,
+        type
+      }) => {
+        try {
+          if (
+            type !==
+            'notify'
+          ) {
+            return
+          }
+
+          for (
+            const message
+            of messages
+          ) {
+            if (
+              !message?.message
+            ) {
+              continue
+            }
+
+            try {
+              await handleMessages(
+                sock,
+                message,
+                plugins,
+                messageListeners
+              )
+            } catch (
+              error
+            ) {
+              console.error(
+                '[MESSAGE ERROR]',
+                error?.message ||
+                  error
+              )
+            }
+          }
+        } catch (
+          error
+        ) {
+          console.error(
+            '[UPsert ERROR]',
+            error?.message ||
+              error
+          )
+        }
+      }
+    )
+
+    /*
+     * ==========================
+     * GROUP PARTICIPANTS
+     * ==========================
+     */
+
+    sock.ev.on(
+      'group-participants.update',
+      async update => {
+        try {
+          await handleGroupParticipants(
+            sock,
+            update,
+            groupListeners
+          )
+        } catch (
+          error
+        ) {
+          console.error(
+            '[GROUP EVENT ERROR]',
+            error?.message ||
+              error
           )
         }
       }
     )
   } catch (error) {
-    reconnecting =
+    starting =
       false
 
     console.error(
-      'Startup error:',
-      error
+      '\n[FATAL]',
+      error?.message ||
+        error
     )
 
-    setTimeout(
-      startBot,
-      5000
-    )
+    if (
+      !reconnecting
+    ) {
+      reconnecting =
+        true
+
+      setTimeout(
+        () => {
+          startBot().catch(
+            console.error
+          )
+        },
+        5000
+      )
+    }
   }
 }
 
-/*
- * ==============================
- * STARTUP
- * ==============================
- */
+async function main() {
+  console.log(
+    '\n╭────────────────────────────╮'
+  )
 
-await loadPlugins()
+  console.log(
+    '│       ʀᴀᴢᴀ-ᴍᴅ ʙᴏᴛ         │'
+  )
 
-await startBot()
+  console.log(
+    '╰────────────────────────────╯\n'
+  )
+
+  console.log(
+    `[CONFIG] Prefix: ${PREFIX}`
+  )
+
+  if (
+    isShortSession(
+      SESSION_ID
+    )
+  ) {
+    console.log(
+      '[CONFIG] Short remote session detected.'
+    )
+  }
+
+  if (
+    PAIR_SERVER_URL
+  ) {
+    console.log(
+      `[CONFIG] Pair server: ${PAIR_SERVER_URL}`
+    )
+  }
+
+  await loadPlugins()
+
+  console.log(
+    `[PLUGINS] ${plugins.size} commands loaded.`
+  )
+
+  console.log(
+    `[PLUGINS] ${messageListeners.length} message listeners loaded.`
+  )
+
+  console.log(
+    `[PLUGINS] ${groupListeners.length} group listeners loaded.`
+  )
+
+  await startBot()
+}
+
+process.on(
+  'uncaughtException',
+  error => {
+    console.error(
+      '[UNCAUGHT]',
+      error?.message ||
+        error
+    )
+  }
+)
+
+process.on(
+  'unhandledRejection',
+  error => {
+    console.error(
+      '[UNHANDLED]',
+      error?.message ||
+        error
+    )
+  }
+)
+
+process.on(
+  'SIGTERM',
+  async () => {
+    console.log(
+      '[SYSTEM] Shutting down...'
+    )
+
+    try {
+      sock?.end(
+        undefined
+      )
+    } catch {}
+
+    process.exit(
+      0
+    )
+  }
+)
+
+process.on(
+  'SIGINT',
+  async () => {
+    console.log(
+      '[SYSTEM] Shutting down...'
+    )
+
+    try {
+      sock?.end(
+        undefined
+      )
+    } catch {}
+
+    process.exit(
+      0
+    )
+  }
+)
+
+main().catch(
+  error => {
+    console.error(
+      '[STARTUP ERROR]',
+      error?.message ||
+        error
+    )
+
+    process.exit(
+      1
+    )
+  }
+)
