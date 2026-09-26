@@ -24,7 +24,7 @@ import {
 
 const ROOT = process.cwd()
 const SESSION_DIR = path.join(ROOT, 'session')
-const PREFIX = '.'
+const PREFIX = process.env.PREFIX || '.'
 
 const logger = P({
   level: 'silent'
@@ -35,7 +35,7 @@ let reconnecting = false
 let startMessageSent = false
 
 /**
- * Initializes and restores creds.json from process.env.SESSION_ID
+ * Restores creds.json from process.env.SESSION_ID with multi-source fallback
  */
 async function initSession() {
   const credsPath = path.join(SESSION_DIR, 'creds.json')
@@ -50,31 +50,60 @@ async function initSession() {
 
   try {
     await fs.promises.mkdir(SESSION_DIR, { recursive: true })
-    const cleanSession = sessionId.trim()
+    let code = sessionId.trim()
+
+    if (code.startsWith('levanter_') || code.startsWith('session_')) {
+      code = code.replace(/^(levanter_|session_)/, '')
+    }
+
     let sessionData = ''
 
-    if (cleanSession.startsWith('{')) {
-      sessionData = cleanSession
-    } else if (cleanSession.includes('://')) {
-      const res = await fetch(cleanSession)
-      sessionData = await res.text()
-    } else if (cleanSession.startsWith('levanter_') || cleanSession.startsWith('session_')) {
-      const code = cleanSession.replace(/^(levanter_|session_)/, '')
-      if (code.length > 50) {
-        sessionData = Buffer.from(code, 'base64').toString('utf-8')
-      } else {
-        const res = await fetch(`https://pastebin.com/raw/${code}`)
-        sessionData = await res.text()
-      }
-    } else {
+    // 1. Direct JSON String
+    if (code.startsWith('{')) {
+      sessionData = code
+    }
+
+    // 2. Base64 Encoded Session
+    if (!sessionData) {
       try {
-        sessionData = Buffer.from(cleanSession, 'base64').toString('utf-8')
-      } catch {
-        sessionData = cleanSession
+        const decoded = Buffer.from(code, 'base64').toString('utf-8').trim()
+        if (decoded.startsWith('{')) {
+          sessionData = decoded
+        }
+      } catch {}
+    }
+
+    // 3. Direct URL Fetch
+    if (!sessionData && code.includes('://')) {
+      const res = await fetch(code)
+      sessionData = await res.text()
+    }
+
+    // 4. Remote Session Endpoints
+    if (!sessionData) {
+      const endpoints = [
+        `https://paste.c-s.in/raw/${code}`,
+        `https://pastebin.com/raw/${code}`,
+        `https://session.levanter.site/session?id=${code}`
+      ]
+
+      for (const url of endpoints) {
+        try {
+          const res = await fetch(url)
+          const text = (await res.text()).trim()
+          if (text.startsWith('{')) {
+            sessionData = text
+            break
+          }
+        } catch {}
       }
     }
 
-    // Verify valid JSON structure before writing
+    if (!sessionData) {
+      throw new Error('Invalid or expired SESSION_ID. Could not fetch valid JSON credentials.')
+    }
+
+    // Validate JSON structure before saving
     JSON.parse(sessionData)
     await fs.promises.writeFile(credsPath, sessionData, 'utf-8')
     console.log('[+] SESSION_ID successfully loaded and restored.')
@@ -106,17 +135,17 @@ async function sendStartMessage() {
 ┃
 ┃ 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ 𝐁ᴏᴛ
 ┃ 𝐒ᴛᴀᴛᴜs : 𝐎ɴʟɪɴᴇ ✅
-┃ 𝐏ʀᴇғɪx : .
+┃ 𝐏ʀᴇғɪx : ${PREFIX}
 ┃ 𝐂ᴏᴍᴍᴀɴᴅs : ${plugins.size}
 ┃ 𝐏ʟᴜɢɪɴs : ${new Set([...plugins.values()]).size}
 ┃
 ╰━━━━━━━━━━━━━━━━━━━━┈⊷
 
-> 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ 𝐁ᴏᴛ 𝐋ᴏᴀᴅᴇ𝐷 ✅
+> 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ 𝐁ᴏᴛ 𝐋ᴏᴀᴅᴇᴅ ✅
 
 𝐓ʜᴀɴᴋs 𝐅ᴏʀ 𝐔sɪɴɢ 𝐑ᴀᴢᴀ-𝐌ᴅ 💗
 
-𝐏ᴏᴡᴇʀᴇᴅ 𝐁ʏ 𝐋ᴇɢᴇɴᴅ 𝐑ᴀᴢᴀ
+𝐏ᴏᴡᴇʀᴇ𝐷 𝐁ʏ 𝐋ᴇɢᴇɴᴅ 𝐑ᴀᴢᴀ
 `.trim()
 
     await sock.sendMessage(botJid, { text: startMessage })
@@ -133,7 +162,7 @@ async function startBot() {
   reconnecting = true
 
   try {
-    // Restore session credentials from env variable
+    // Load and restore credentials from SESSION_ID environment variable
     await initSession()
 
     const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR)
@@ -170,7 +199,7 @@ async function startBot() {
         console.log('╭━━━〔 𝐑ᴀᴢᴀ-𝐌ᴅ 〕━━━┈⊷')
         console.log('┃ 𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ 𝐁ᴏᴛ')
         console.log('┃ 𝐒ᴛᴀᴛᴜs : 𝐎ɴʟɪɴᴇ ✅')
-        console.log('┃ 𝐏ʀᴇғɪx : .')
+        console.log(`┃ 𝐏ʀᴇғɪx : ${PREFIX}`)
         console.log(`┃ 𝐂ᴏᴍᴍᴀɴᴅs : ${plugins.size}`)
         console.log(`┃ 𝐏ʟᴜɢɪɴs : ${new Set([...plugins.values()]).size}`)
         console.log('┃ 𝐏ᴏᴡᴇʀᴇᴅ 𝐁ʏ : 𝐋ᴇɢᴇɴᴅ 𝐑ᴀᴢᴀ')
