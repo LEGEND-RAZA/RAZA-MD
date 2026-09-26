@@ -23,7 +23,7 @@
     "PAIR_SERVER_URL": {
       "description": "Raza-MD pairing server URL",
       "required": true,
-      "value": "https://raza-session1-7f588dce4a9d.herokuapp.com"
+      "value": "https://pair-web-3e08f4e68faf.herokuapp.com"
     },
     "PREFIX": {
       "description": "Bot command prefix",
