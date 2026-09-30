@@ -86,7 +86,7 @@ export default {
     }).join('')
 
     await sock.sendMessage(jid, {
-      text: `𝀈᪳𝆺𝅥𝆬᷼𓄹𝅮𝅯${first} 💀🐍⚜🔥〬⃝̥𝆺𝆭𝆬𝆭𝆬`
+      text: `𝀈᪳𝆺𝅥𝆬᷼𓄹𝅮𝅯${first} 💀🐍🔥〬⃝̥𝆺𝆭𝆬𝆭𝆬`
     })
 
     await sock.sendMessage(jid, {
