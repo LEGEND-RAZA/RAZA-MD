@@ -1,7 +1,7 @@
 export default {
   command: ['deploy', 'update', 'redeploy'],
   category: 'owner',
-  description: 'Deploy Raza-MD to a Heroku app',
+  description: 'Create or deploy Raza-MD on Heroku',
 
   async run({ sock, message, args, isOwner }) {
     if (!isOwner) return
@@ -35,7 +35,7 @@ export default {
             'ᴜsᴇ:\n' +
             '.ᴅᴇᴘʟᴏʏ <ᴀᴘᴘɴᴀᴍᴇ> <sᴇssɪᴏɴɪᴅ>\n\n' +
             'ᴇxᴀᴍᴘʟᴇ:\n' +
-            '.ᴅᴇᴘʟᴏʏ ʙᴜɴɴʏ ʀᴀᴢᴀ_xxxxxxxx'
+            '.ᴅᴇᴘʟᴏʏ ʙᴜɴɴʏ3737 ʀᴀᴢᴀ_xxxxxxxx'
         },
         { quoted: message }
       )
@@ -54,35 +54,64 @@ export default {
       'Content-Type': 'application/json'
     }
 
-    const apiBase =
-      `https://api.heroku.com/apps/${encodeURIComponent(appName)}`
+    const apiRoot = 'https://api.heroku.com'
 
     const sourceUrl =
       `https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz`
 
     try {
-      // Check app access first
-      const appResponse = await fetch(
-        apiBase,
+      // Check app
+      let appResponse = await fetch(
+        `${apiRoot}/apps/${encodeURIComponent(appName)}`,
         {
           method: 'GET',
           headers
         }
       )
 
-      const appData =
+      let appData =
         await appResponse.json().catch(() => ({}))
 
-      if (!appResponse.ok) {
-        if (appResponse.status === 404) {
+      let created = false
+
+      // Create app if it does not exist
+      if (appResponse.status === 404) {
+        const createResponse = await fetch(
+          `${apiRoot}/apps`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              name: appName,
+              stack: 'heroku-24'
+            })
+          }
+        )
+
+        const createData =
+          await createResponse.json().catch(() => ({}))
+
+        if (!createResponse.ok) {
           throw new Error(
-            `Heroku app "${appName}" was not found or you do not have access to it.`
+            createData?.message ||
+            createData?.error ||
+            `App creation failed: HTTP ${createResponse.status}`
           )
         }
 
-        if (appResponse.status === 401 || appResponse.status === 403) {
+        appData = createData
+        created = true
+
+        appResponse = createResponse
+      }
+
+      if (!appResponse.ok && !created) {
+        if (
+          appResponse.status === 401 ||
+          appResponse.status === 403
+        ) {
           throw new Error(
-            `You do not have access to the app "${appName}".`
+            `You do not have permission to access or create the app "${appName}".`
           )
         }
 
@@ -93,22 +122,28 @@ export default {
         )
       }
 
-      // Access confirmed
+      const actualAppName =
+        appData?.name || appName
+
       await sock.sendMessage(
         jid,
         {
           text:
-            '🚀 ʀᴀᴢᴀ-ᴍᴅ ᴅᴇᴘʟᴏʏ sᴛᴀʀᴛᴇᴅ\n\n' +
+            `🚀 ʀᴀᴢᴀ-ᴍᴅ ᴅᴇᴘʟᴏʏ sᴛᴀʀᴛᴇᴅ\n\n` +
+            `☁️ ᴀᴘᴘ: ${actualAppName}\n` +
             `📦 ʀᴇᴘᴏ: ${REPO}\n` +
             `🌿 ʙʀᴀɴᴄʜ: ${BRANCH}\n` +
-            `☁️ ᴀᴘᴘ: ${appName}\n\n` +
-            '🔐 sᴇssɪᴏɴ ɪᴅ ᴘʀᴇᴘᴀʀɪɴɢ...\n' +
+            `${created ? '🆕 ɴᴇᴡ ᴀᴘᴘ: ᴄʀᴇᴀᴛᴇᴅ\n' : ''}` +
+            '\n🔐 sᴇssɪᴏɴ ɪᴅ ᴘʀᴇᴘᴀʀɪɴɢ...\n' +
             '⏳ sᴛᴀʀᴛɪɴɢ ʙᴜɪʟᴅ...'
         },
         { quoted: message }
       )
 
-      // Update config vars
+      const apiBase =
+        `${apiRoot}/apps/${encodeURIComponent(actualAppName)}`
+
+      // Set config vars
       const configResponse = await fetch(
         `${apiBase}/config-vars`,
         {
@@ -133,7 +168,7 @@ export default {
         )
       }
 
-      // Start Heroku build
+      // Start build
       const buildResponse = await fetch(
         `${apiBase}/builds`,
         {
@@ -168,12 +203,12 @@ export default {
         {
           text:
             '✅ ʀᴀᴢᴀ-ᴍᴅ ᴅᴇᴘʟᴏʏ ᴄʀᴇᴀᴛᴇᴅ\n\n' +
-            `☁️ ᴀᴘᴘ: ${appName}\n` +
+            `☁️ ᴀᴘᴘ: ${actualAppName}\n` +
             `📦 ʙᴜɪʟᴅ: ${buildId}\n` +
             `🌿 ʙʀᴀɴᴄʜ: ${BRANCH}\n` +
             '🔐 sᴇssɪᴏɴ_ɪᴅ: ᴜᴘᴅᴀᴛᴇᴅ\n' +
             `📊 sᴛᴀᴛᴜs: ${buildData?.status || 'pending'}\n\n` +
-            '🔄 ᴛʜᴇ ᴀᴘᴘ ᴡɪʟʟ ʀᴇsᴛᴀʀᴛ ᴀғᴛᴇʀ ᴛʜᴇ ɴᴇᴡ ʀᴇʟᴇᴀsᴇ.'
+            '🔄 ᴛʜᴇ ɴᴇᴡ ʀᴀᴢᴀ-ᴍᴅ ʙᴏᴛ ᴡɪʟʟ sᴛᴀʀᴛ ᴀғᴛᴇʀ ᴛʜᴇ ʙᴜɪʟᴅ.'
         },
         { quoted: message }
       )
