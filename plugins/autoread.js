@@ -5,7 +5,7 @@ import {
 
 export default {
   command: 'autoread',
-  category: 'security',
+  category: 'owner',
 
   async run({
     sock,
