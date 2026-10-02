@@ -17,11 +17,9 @@ export default {
         {
           text:
             '❌ ʜᴇʀᴏᴋᴜ ᴀᴘɪ ᴋᴇʏ ɪs ᴍɪssɪɴɢ.\n\n' +
-            'sᴇᴛ ʜᴇʀᴏᴋᴜ_ᴀᴘɪ_ᴋᴇʏ ɪɴ ᴛʜᴇ ᴄᴜʀʀᴇɴᴛ ʙᴏᴛ ᴀᴘᴘ.'
+            'sᴇᴛ ʜᴇʀᴏᴋᴜ_ᴀᴘɪ_ᴋᴇʏ ɪɴ ᴛʜᴇ ʙᴏᴛ ᴀᴘᴘ.'
         },
-        {
-          quoted: message
-        }
+        { quoted: message }
       )
     }
 
@@ -37,16 +35,15 @@ export default {
             'ᴜsᴇ:\n' +
             '.ᴅᴇᴘʟᴏʏ <ᴀᴘᴘɴᴀᴍᴇ> <sᴇssɪᴏɴɪᴅ>\n\n' +
             'ᴇxᴀᴍᴘʟᴇ:\n' +
-            '.ᴅᴇᴘʟᴏʏ ʀᴀᴢᴀ-ᴍᴅ ʀᴀᴢᴀ_xxxxxxxx'
+            '.ᴅᴇᴘʟᴏʏ ʙᴜɴɴʏ ʀᴀᴢᴀ_xxxxxxxx'
         },
-        {
-          quoted: message
-        }
+        { quoted: message }
       )
     }
 
     const REPO = 'LEGEND-RAZA/RAZA-MD'
     const BRANCH = 'main'
+
     const PAIR_SERVER_URL =
       process.env.PAIR_SERVER_URL ||
       'https://pair-web-3e08f4e68faf.herokuapp.com'
@@ -64,6 +61,39 @@ export default {
       `https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz`
 
     try {
+      // Check app access first
+      const appResponse = await fetch(
+        apiBase,
+        {
+          method: 'GET',
+          headers
+        }
+      )
+
+      const appData =
+        await appResponse.json().catch(() => ({}))
+
+      if (!appResponse.ok) {
+        if (appResponse.status === 404) {
+          throw new Error(
+            `Heroku app "${appName}" was not found or you do not have access to it.`
+          )
+        }
+
+        if (appResponse.status === 401 || appResponse.status === 403) {
+          throw new Error(
+            `You do not have access to the app "${appName}".`
+          )
+        }
+
+        throw new Error(
+          appData?.message ||
+          appData?.error ||
+          `Unable to access app: HTTP ${appResponse.status}`
+        )
+      }
+
+      // Access confirmed
       await sock.sendMessage(
         jid,
         {
@@ -75,11 +105,10 @@ export default {
             '🔐 sᴇssɪᴏɴ ɪᴅ ᴘʀᴇᴘᴀʀɪɴɢ...\n' +
             '⏳ sᴛᴀʀᴛɪɴɢ ʙᴜɪʟᴅ...'
         },
-        {
-          quoted: message
-        }
+        { quoted: message }
       )
 
+      // Update config vars
       const configResponse = await fetch(
         `${apiBase}/config-vars`,
         {
@@ -100,10 +129,11 @@ export default {
         throw new Error(
           configData?.message ||
           configData?.error ||
-          `config vars failed: HTTP ${configResponse.status}`
+          `Config update failed: HTTP ${configResponse.status}`
         )
       }
 
+      // Start Heroku build
       const buildResponse = await fetch(
         `${apiBase}/builds`,
         {
@@ -126,7 +156,7 @@ export default {
         throw new Error(
           buildData?.message ||
           buildData?.error ||
-          `build failed: HTTP ${buildResponse.status}`
+          `Build failed: HTTP ${buildResponse.status}`
         )
       }
 
@@ -145,10 +175,9 @@ export default {
             `📊 sᴛᴀᴛᴜs: ${buildData?.status || 'pending'}\n\n` +
             '🔄 ᴛʜᴇ ᴀᴘᴘ ᴡɪʟʟ ʀᴇsᴛᴀʀᴛ ᴀғᴛᴇʀ ᴛʜᴇ ɴᴇᴡ ʀᴇʟᴇᴀsᴇ.'
         },
-        {
-          quoted: message
-        }
+        { quoted: message }
       )
+
     } catch (error) {
       console.error(
         '[DEPLOY ERROR]:',
@@ -162,9 +191,7 @@ export default {
             '❌ ʀᴀᴢᴀ-ᴍᴅ ᴅᴇᴘʟᴏʏ ғᴀɪʟᴇᴅ\n\n' +
             `${error?.message || 'unknown error'}`
         },
-        {
-          quoted: message
-        }
+        { quoted: message }
       )
     }
   }
