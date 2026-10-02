@@ -60,7 +60,6 @@ export default {
       `https://github.com/${REPO}/archive/refs/heads/${BRANCH}.tar.gz`
 
     try {
-      // Check app
       let appResponse = await fetch(
         `${apiRoot}/apps/${encodeURIComponent(appName)}`,
         {
@@ -74,7 +73,6 @@ export default {
 
       let created = false
 
-      // Create app if it does not exist
       if (appResponse.status === 404) {
         const createResponse = await fetch(
           `${apiRoot}/apps`,
@@ -101,7 +99,6 @@ export default {
 
         appData = createData
         created = true
-
         appResponse = createResponse
       }
 
@@ -125,11 +122,14 @@ export default {
       const actualAppName =
         appData?.name || appName
 
+      const apiBase =
+        `${apiRoot}/apps/${encodeURIComponent(actualAppName)}`
+
       await sock.sendMessage(
         jid,
         {
           text:
-            `🚀 ʀᴀᴢᴀ-ᴍᴅ ᴅᴇᴘʟᴏʏ sᴛᴀʀᴛᴇᴅ\n\n` +
+            '🚀 ʀᴀᴢᴀ-ᴍᴅ ᴅᴇᴘʟᴏʏ sᴛᴀʀᴛᴇᴅ\n\n' +
             `☁️ ᴀᴘᴘ: ${actualAppName}\n` +
             `📦 ʀᴇᴘᴏ: ${REPO}\n` +
             `🌿 ʙʀᴀɴᴄʜ: ${BRANCH}\n` +
@@ -139,9 +139,6 @@ export default {
         },
         { quoted: message }
       )
-
-      const apiBase =
-        `${apiRoot}/apps/${encodeURIComponent(actualAppName)}`
 
       // Set config vars
       const configResponse = await fetch(
@@ -198,6 +195,38 @@ export default {
       const buildId =
         buildData?.id || 'unknown'
 
+      // Configure worker formation
+      const formationResponse = await fetch(
+        `${apiBase}/formation`,
+        {
+          method: 'PATCH',
+          headers,
+          body: JSON.stringify([
+            {
+              type: 'worker',
+              quantity: 1,
+              size: 'basic'
+            },
+            {
+              type: 'web',
+              quantity: 0,
+              size: 'basic'
+            }
+          ])
+        }
+      )
+
+      const formationData =
+        await formationResponse.json().catch(() => ({}))
+
+      if (!formationResponse.ok) {
+        throw new Error(
+          formationData?.message ||
+          formationData?.error ||
+          `Worker formation failed: HTTP ${formationResponse.status}`
+        )
+      }
+
       await sock.sendMessage(
         jid,
         {
@@ -207,8 +236,11 @@ export default {
             `📦 ʙᴜɪʟᴅ: ${buildId}\n` +
             `🌿 ʙʀᴀɴᴄʜ: ${BRANCH}\n` +
             '🔐 sᴇssɪᴏɴ_ɪᴅ: ᴜᴘᴅᴀᴛᴇᴅ\n' +
+            '⚙️ ᴘʀᴏᴄᴇss: ᴡᴏʀᴋᴇʀ\n' +
+            '▶️ ᴄᴏᴍᴍᴀɴᴅ: ɴᴏᴅᴇ ɪɴᴅᴇx.ᴊs\n' +
+            '🌐 ᴡᴇʙ: ᴅɪsᴀʙʟᴇᴅ\n' +
             `📊 sᴛᴀᴛᴜs: ${buildData?.status || 'pending'}\n\n` +
-            '🔄 ᴛʜᴇ ɴᴇᴡ ʀᴀᴢᴀ-ᴍᴅ ʙᴏᴛ ᴡɪʟʟ sᴛᴀʀᴛ ᴀғᴛᴇʀ ᴛʜᴇ ʙᴜɪʟᴅ.'
+            '🔄 ʀᴀᴢᴀ-ᴍᴅ ᴡɪʟʟ ʀᴜɴ ᴀs ᴀ ᴡᴏʀᴋᴇʀ.'
         },
         { quoted: message }
       )
