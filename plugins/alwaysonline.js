@@ -7,7 +7,7 @@ import {
 
 export default {
   command: 'alwaysonline',
-  category: 'control',
+  category: 'owner',
 
   async run({
     sock,
