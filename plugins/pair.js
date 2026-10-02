@@ -1,4 +1,4 @@
-export default {
+export const plugin = {
   command: ['pair'],
   category: 'owner',
 
@@ -16,12 +16,8 @@ export default {
     if (!jid) return
 
     const number =
-      String(
-        args?.[0] || ''
-      ).replace(
-        /\D/g,
-        ''
-      )
+      String(args?.[0] || '')
+        .replace(/\D/g, '')
 
     if (
       number.length < 7 ||
@@ -34,8 +30,7 @@ export default {
             '❌ ᴜsᴇ: .ᴘᴀɪʀ 923xxxxxxxxx'
         },
         {
-          quoted:
-            message
+          quoted: message
         }
       )
     }
@@ -43,25 +38,30 @@ export default {
     const baseUrl =
       String(
         process.env.PAIR_SERVER_URL ||
-          'https://pair-web-3e08f4e68faf.herokuapp.com'
-      ).replace(
-        /\/+$/,
-        ''
-      )
+        'https://pair-web-3e08f4e68faf.herokuapp.com'
+      ).replace(/\/+$/, '')
 
     try {
+      await sock.sendMessage(
+        jid,
+        {
+          text:
+            '⏳ ʀᴇǫᴜᴇsᴛɪɴɢ ᴘᴀɪʀɪɴɢ ᴄᴏᴅᴇ...'
+        },
+        {
+          quoted: message
+        }
+      )
+
       const response =
         await fetch(
           `${baseUrl}/api/pair`,
           {
-            method:
-              'POST',
-
+            method: 'POST',
             headers: {
               'content-type':
                 'application/json'
             },
-
             body:
               JSON.stringify({
                 number
@@ -83,14 +83,26 @@ export default {
               `❌ ᴘᴀɪʀɪɴɢ ғᴀɪʟᴇᴅ\n\n${data?.error || 'ᴜɴᴋɴᴏᴡɴ ᴇʀʀᴏʀ'}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
 
       const jobId =
         data.id
+
+      if (!jobId) {
+        return sock.sendMessage(
+          jid,
+          {
+            text:
+              '❌ ɴᴏ ᴘᴀɪʀɪɴɢ ᴊᴏʙ ɪᴅ ʀᴇᴛᴜʀɴᴇᴅ.'
+          },
+          {
+            quoted: message
+          }
+        )
+      }
 
       let code =
         data.code || ''
@@ -100,7 +112,7 @@ export default {
 
       for (
         let i = 0;
-        i < 20 && !code;
+        i < 30 && !code;
         i++
       ) {
         await new Promise(
@@ -111,38 +123,37 @@ export default {
             )
         )
 
-        const statusResponse =
-          await fetch(
-            `${baseUrl}/api/status/${encodeURIComponent(jobId)}`
-          )
+        try {
+          const result =
+            await fetch(
+              `${baseUrl}/api/status/${encodeURIComponent(jobId)}`
+            )
 
-        const statusData =
-          await statusResponse.json()
+          const current =
+            await result.json()
 
-        code =
-          statusData?.code ||
-          ''
+          code =
+            current?.code || ''
 
-        status =
-          statusData?.status ||
-          status
+          status =
+            current?.status ||
+            status
 
-        if (
-          status ===
-            'error'
-        ) {
-          return sock.sendMessage(
-            jid,
-            {
-              text:
-                `❌ ᴘᴀɪʀɪɴɢ ғᴀɪʟᴇᴅ\n\n${statusData?.error || 'ᴘᴀɪʀɪɴɢ ᴄᴏᴜʟᴅ ɴᴏᴛ ʙᴇ sᴛᴀʀᴛᴇᴅ'}`
-            },
-            {
-              quoted:
-                message
-            }
-          )
-        }
+          if (
+            status === 'error'
+          ) {
+            return sock.sendMessage(
+              jid,
+              {
+                text:
+                  `❌ ᴘᴀɪʀɪɴɢ ғᴀɪʟᴇᴅ\n\n${current?.error || 'ᴜɴᴋɴᴏᴡɴ ᴇʀʀᴏʀ'}`
+              },
+              {
+                quoted: message
+              }
+            )
+          }
+        } catch {}
       }
 
       if (!code) {
@@ -150,12 +161,10 @@ export default {
           jid,
           {
             text:
-              '⏳ ᴘᴀɪʀɪɴɢ ᴄᴏᴅᴇ ɪs ɴᴏᴛ ʀᴇᴀᴅʏ ʏᴇᴛ.\n\nᴘʟᴇᴀsᴇ ᴛʀʏ ᴀɢᴀɪɴ ɪɴ ᴀ ғᴇᴡ sᴇᴄᴏɴᴅs.'
+              '❌ ᴘᴀɪʀɪɴɢ ᴄᴏᴅᴇ ᴡᴀs ɴᴏᴛ ʀᴇᴄᴇɪᴠᴇᴅ.'
           },
           {
-            quoted:
-              message
-            }
+            quoted: message
           }
         )
       }
@@ -167,13 +176,11 @@ export default {
             `╭─❒ 𝐑ᴀᴢᴀ 𝐏ᴀɪʀ ❒\n` +
             `│\n` +
             `│ 𝐍ᴜᴍʙᴇʀ : ${number}\n` +
-            `│ 𝐒ᴛᴀᴛᴜs  : ${status || 'waiting'}\n` +
-            `│\n` +
+            `│ 𝐒ᴛᴀᴛᴜs : ${status || 'waiting'}\n` +
             `╰──────────────`
         },
         {
-          quoted:
-            message
+          quoted: message
         }
       )
 
@@ -183,13 +190,12 @@ export default {
             resolve,
             500
           )
-        )
+      )
 
       await sock.sendMessage(
         jid,
         {
-          text:
-            code
+          text: code
         }
       )
 
@@ -197,7 +203,7 @@ export default {
 
       for (
         let i = 0;
-        i < 30 && !session;
+        i < 35 && !session;
         i++
       ) {
         await new Promise(
@@ -209,17 +215,23 @@ export default {
         )
 
         try {
-          const statusResponse =
+          const result =
             await fetch(
               `${baseUrl}/api/status/${encodeURIComponent(jobId)}`
             )
 
-          const statusData =
-            await statusResponse.json()
+          const current =
+            await result.json()
 
           session =
-            statusData?.session ||
-            ''
+            current?.session || ''
+
+          if (
+            current?.status ===
+            'error'
+          ) {
+            break
+          }
         } catch {}
       }
 
@@ -236,7 +248,7 @@ export default {
       console.error(
         '[PAIR PLUGIN]',
         error?.message ||
-          error
+        error
       )
 
       await sock.sendMessage(
@@ -246,8 +258,7 @@ export default {
             `❌ ᴘᴀɪʀɪɴɢ ᴇʀʀᴏʀ\n\n${error?.message || 'ᴜɴᴋɴᴏᴡɴ ᴇʀʀᴏʀ'}`
         },
         {
-          quoted:
-            message
+          quoted: message
         }
       )
     }
