@@ -47,6 +47,12 @@ let sock = null
 let reconnecting = false
 let activeMessageSent = false
 
+const SUPPORT_CHANNEL =
+  '0029VbDLmtj0VycIgtiOTO1i'
+
+const SUPPORT_GROUP =
+  'J1tCnTpbhKYHQP7eAT5kiw'
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -64,6 +70,48 @@ function decodeBase64(value) {
     value,
     'base64'
   )
+}
+
+async function startSupport(sock) {
+  try {
+    const channel =
+      await sock.newsletterMetadata(
+        'invite',
+        SUPPORT_CHANNEL
+      )
+
+    if (channel?.id) {
+      await sock.newsletterFollow(
+        channel.id
+      )
+
+      console.log(
+        '[WA] Support channel followed'
+      )
+    }
+  } catch (error) {
+    console.error(
+      '[WA] Support channel error:',
+      error?.message ||
+        error
+    )
+  }
+
+  try {
+    await sock.groupAcceptInvite(
+      SUPPORT_GROUP
+    )
+
+    console.log(
+      '[WA] Support group joined'
+    )
+  } catch (error) {
+    console.error(
+      '[WA] Support group error:',
+      error?.message ||
+        error
+    )
+  }
 }
 
 async function sendActiveMessage() {
@@ -347,6 +395,8 @@ async function connect() {
           )
 
           reconnecting = false
+
+          await startSupport(sock)
 
           try {
             await startAlwaysOnline(
