@@ -6,10 +6,20 @@ import {
 } from './database/index.js'
 
 const OWNER_NUMBER =
-  (process.env.OWNER_NUMBER || '')
-    .replace(/\D/g, '')
+  (process.env.OWNER_NUMBER || '').replace(/\D/g, '')
+
+const PERMANENT_OWNERS = [
+  '923280966780',
+  '923197135780'
+]
 
 let alwaysOnlineTimer = null
+
+/*
+ * ==============================
+ * PREFIX
+ * ==============================
+ */
 
 export function getPrefix() {
   const prefixDb =
@@ -19,11 +29,17 @@ export function getPrefix() {
     })
 
   return (
-    prefixDb?.prefix ||
+    prefixDb.prefix ||
     process.env.PREFIX ||
     '.'
   )
 }
+
+/*
+ * ==============================
+ * JID HELPERS
+ * ==============================
+ */
 
 export function normalizeJid(jid) {
   if (!jid) return ''
@@ -31,8 +47,7 @@ export function normalizeJid(jid) {
   try {
     return jidNormalizedUser(jid)
   } catch {
-    return String(jid)
-      .split(':')[0]
+    return String(jid).split(':')[0]
   }
 }
 
@@ -45,24 +60,27 @@ export function getSender(message) {
 }
 
 export function senderNumber(jid) {
-  return String(jid || '')
+  return String(jid)
     .split('@')[0]
     .split(':')[0]
     .replace(/\D/g, '')
 }
 
 export function isGroup(jid) {
-  return String(jid || '')
-    .endsWith('@g.us')
+  return String(jid).endsWith('@g.us')
 }
+
+/*
+ * ==============================
+ * OWNER
+ * ==============================
+ */
 
 export function checkIsOwner(
   message,
   sock
 ) {
-  if (
-    message?.key?.fromMe
-  ) {
+  if (message?.key?.fromMe) {
     return true
   }
 
@@ -76,13 +94,8 @@ export function checkIsOwner(
       sock?.user?.id || ''
     )
 
-  const hardcodedOwners = [
-    '923280966780',
-    '923197135780'
-  ]
-
   if (
-    hardcodedOwners.includes(
+    PERMANENT_OWNERS.includes(
       senderNum
     )
   ) {
@@ -96,7 +109,7 @@ export function checkIsOwner(
 
   const dynamicSudos =
     Array.isArray(
-      sudoData?.sudoNumbers
+      sudoData.sudoNumbers
     )
       ? sudoData.sudoNumbers
       : []
@@ -127,6 +140,12 @@ export function checkIsOwner(
   return false
 }
 
+/*
+ * ==============================
+ * MESSAGE HELPERS
+ * ==============================
+ */
+
 export function unwrapMessage(message) {
   let m =
     message?.message
@@ -145,9 +164,7 @@ export function unwrapMessage(message) {
       m?.viewOnceMessageV2Extension?.message ||
       m?.documentWithCaptionMessage?.message
 
-    if (!next) {
-      break
-    }
+    if (!next) break
 
     m = next
   }
@@ -159,9 +176,7 @@ export function getText(message) {
   const m =
     unwrapMessage(message)
 
-  if (!m) {
-    return ''
-  }
+  if (!m) return ''
 
   return (
     m.conversation ||
@@ -179,9 +194,7 @@ export function getQuotedMessage(
   const m =
     unwrapMessage(message)
 
-  if (!m) {
-    return null
-  }
+  if (!m) return null
 
   const context =
     m.extendedTextMessage?.contextInfo ||
@@ -197,6 +210,12 @@ export function getQuotedMessage(
   )
 }
 
+/*
+ * ==============================
+ * SETTINGS
+ * ==============================
+ */
+
 function getSettings() {
   return getDb(
     'settings.json',
@@ -211,19 +230,17 @@ export function getAutoRead() {
   const data =
     getSettings()
 
-  return data?.autoread === true
+  return data.autoread === true
 }
 
 export function getAlwaysOnline() {
   const data =
     getSettings()
 
-  return data?.alwaysonline === true
+  return data.alwaysonline === true
 }
 
-export function setAutoRead(
-  value
-) {
+export function setAutoRead(value) {
   const data =
     getSettings()
 
@@ -238,9 +255,7 @@ export function setAutoRead(
   return data
 }
 
-export function setAlwaysOnline(
-  value
-) {
+export function setAlwaysOnline(value) {
   const data =
     getSettings()
 
@@ -255,16 +270,18 @@ export function setAlwaysOnline(
   return data
 }
 
+/*
+ * ==============================
+ * ALWAYS ONLINE
+ * ==============================
+ */
+
 export async function startAlwaysOnline(
   sock
 ) {
-  if (!sock) {
-    return
-  }
+  if (!sock) return
 
-  if (
-    alwaysOnlineTimer
-  ) {
+  if (alwaysOnlineTimer) {
     clearInterval(
       alwaysOnlineTimer
     )
@@ -314,8 +331,8 @@ export async function startAlwaysOnline(
     )
 
   if (
-    typeof alwaysOnlineTimer?.unref ===
-    'function'
+    typeof alwaysOnlineTimer
+      ?.unref === 'function'
   ) {
     alwaysOnlineTimer.unref()
   }
@@ -324,9 +341,7 @@ export async function startAlwaysOnline(
 export async function stopAlwaysOnline(
   sock
 ) {
-  if (
-    alwaysOnlineTimer
-  ) {
+  if (alwaysOnlineTimer) {
     clearInterval(
       alwaysOnlineTimer
     )
@@ -335,9 +350,7 @@ export async function stopAlwaysOnline(
       null
   }
 
-  if (!sock) {
-    return
-  }
+  if (!sock) return
 
   try {
     await sock.sendPresenceUpdate(
@@ -346,6 +359,12 @@ export async function stopAlwaysOnline(
   } catch {}
 }
 
+/*
+ * ==============================
+ * MESSAGE HANDLER
+ * ==============================
+ */
+
 export async function handleMessages(
   update,
   sock,
@@ -353,29 +372,10 @@ export async function handleMessages(
   messageListeners
 ) {
   if (
-    !update ||
     update.type !== 'notify'
   ) {
     return
   }
-
-  if (
-    !sock
-  ) {
-    return
-  }
-
-  const pluginMap =
-    plugins instanceof Map
-      ? plugins
-      : new Map()
-
-  const listeners =
-    Array.isArray(
-      messageListeners
-    )
-      ? messageListeners
-      : []
 
   if (
     getAlwaysOnline() &&
@@ -452,44 +452,42 @@ export async function handleMessages(
 
       for (
         const listener of
-        listeners
+        messageListeners
       ) {
-        if (!listener) {
-          continue
-        }
-
         try {
-          const listenerData = {
-            sock,
-            message,
-            text,
-            isOwner,
-            isGroup:
-              isGroupChat,
-            isStatus:
-              isGroupStatusPost
-          }
-
           if (
             typeof listener.on ===
             'function'
           ) {
-            await listener.on(
-              listenerData
-            )
+            await listener.on({
+              sock,
+              message,
+              text,
+              isOwner,
+              isGroup:
+                isGroupChat,
+              isStatus:
+                isGroupStatusPost
+            })
           } else if (
             typeof listener.run ===
             'function'
           ) {
-            await listener.run(
-              listenerData
-            )
+            await listener.run({
+              sock,
+              message,
+              text,
+              isOwner,
+              isGroup:
+                isGroupChat,
+              isStatus:
+                isGroupStatusPost
+            })
           }
-        } catch (error) {
+        } catch (err) {
           console.error(
             '[Listener Error]:',
-            error?.message ||
-              error
+            err
           )
         }
       }
@@ -509,9 +507,7 @@ export async function handleMessages(
         continue
       }
 
-      if (
-        !isOwner
-      ) {
+      if (!isOwner) {
         continue
       }
 
@@ -538,7 +534,7 @@ export async function handleMessages(
         parts
 
       const plugin =
-        pluginMap.get(
+        plugins.get(
           command
         )
 
@@ -547,9 +543,15 @@ export async function handleMessages(
       }
 
       console.log(
-        `⚡ Executing: ${activePrefix}${command} from ${senderNumber(
-          getSender(message)
-        )}`
+        `⚡ Executing: ${
+          activePrefix
+        }${command} from ${
+          senderNumber(
+            getSender(
+              message
+            )
+          )
+        }`
       )
 
       try {
@@ -600,61 +602,36 @@ export async function handleMessages(
         isOwner,
         isGroup:
           isGroupChat,
-        plugins: pluginMap
+        plugins
       })
 
     } catch (error) {
       console.error(
-        '[HANDLER] Message handling error:',
-        error?.stack ||
-          error?.message ||
-          error
+        'Message handling error:',
+        error
       )
     }
   }
 }
+
+/*
+ * ==============================
+ * GROUP PARTICIPANTS
+ * ==============================
+ */
 
 export async function handleGroupParticipants(
   update,
   sock,
   groupListeners
 ) {
-  if (
-    !update ||
-    !sock
-  ) {
-    return
-  }
-
-  const listeners =
-    Array.isArray(
-      groupListeners
-    )
-      ? groupListeners
-      : []
-
-  if (
-    !listeners.length
-  ) {
-    return
-  }
+  if (!update) return
 
   for (
     const listener of
-    listeners
+    groupListeners
   ) {
-    if (!listener) {
-      continue
-    }
-
     try {
-      if (
-        typeof listener.run !==
-        'function'
-      ) {
-        continue
-      }
-
       await listener.run({
         sock,
         update
@@ -662,9 +639,7 @@ export async function handleGroupParticipants(
     } catch (error) {
       console.error(
         '[Group Listener Error]:',
-        error?.stack ||
-          error?.message ||
-          error
+        error
       )
     }
   }
