@@ -1,36 +1,64 @@
 export default {
   command: ['delete', 'del', 'dlt'],
   category: 'group',
+
   async run({ sock, message, isGroup, isOwner }) {
-    const jid = message.key.remoteJid
+    const jid = message?.key?.remoteJid
+    if (!jid) return
 
-    // Get context info of the quoted message
-    const contextInfo = message.message?.extendedTextMessage?.contextInfo
-    const quotedKey = contextInfo?.stanzaId
+    const contextInfo =
+      message?.message?.extendedTextMessage?.contextInfo ||
+      message?.message?.imageMessage?.contextInfo ||
+      message?.message?.videoMessage?.contextInfo ||
+      message?.message?.audioMessage?.contextInfo ||
+      message?.message?.documentMessage?.contextInfo
 
-    if (!quotedKey) return
+    const stanzaId = contextInfo?.stanzaId
+    const participant =
+      contextInfo?.participant ||
+      contextInfo?.remoteJid
 
-    const targetParticipant = contextInfo.participant || contextInfo.remoteJid
-
-    // Admin & Owner authorization check for deleting other users' messages in groups
-    if (isGroup) {
-      const groupMetadata = await sock.groupMetadata(jid).catch(() => null)
-      if (groupMetadata) {
-        const sender = message.key.participant || jid
-        const isAdmin = groupMetadata.participants.some(p => p.id === sender && p.admin !== null)
-        
-        // If not deleting own message, check admin/owner permissions
-        if (targetParticipant !== message.key.id && !isAdmin && !isOwner) return
-      }
-    }
+    if (!stanzaId) return
 
     try {
+      if (isGroup) {
+        const metadata = await sock.groupMetadata(jid).catch(() => null)
+        if (!metadata) return
+
+        const sender =
+          message?.key?.participant ||
+          message?.participant ||
+          jid
+
+        const senderNormalized = sender.split(':')[0]
+
+        const isAdmin = metadata.participants.some(p => {
+          const participantId = p?.id?.split(':')[0]
+          return (
+            participantId === senderNormalized &&
+            (p.admin === 'admin' || p.admin === 'superadmin')
+          )
+        })
+
+        if (!isAdmin && !isOwner) return
+      }
+
+      const botJid = sock?.user?.id
+        ? sock.user.id.split(':')[0] + '@s.whatsapp.net'
+        : null
+
+      const targetJid = participant || jid
+
       await sock.sendMessage(jid, {
         delete: {
           remoteJid: jid,
-          fromMe: targetParticipant === sock.user.id.split(':')[0] + '@s.whatsapp.net',
-          id: quotedKey,
-          participant: targetParticipant
+          fromMe: botJid ? targetJid === botJid : false,
+          id: stanzaId,
+          participant: targetJid
         }
       })
-   
+    } catch (error) {
+      console.error('[DELETE] Error:', error?.message || error)
+    }
+  }
+}
