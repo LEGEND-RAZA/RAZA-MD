@@ -52,9 +52,16 @@ export function normalizeJid(jid) {
 }
 
 export function getSender(message) {
+  const key =
+    message?.key || {}
+
   return (
-    message?.key?.participant ||
-    message?.key?.remoteJid ||
+    key.participantPn ||
+    key.senderPn ||
+    key.participantAlt ||
+    key.remoteJidAlt ||
+    key.participant ||
+    key.remoteJid ||
     ''
   )
 }
@@ -64,6 +71,29 @@ export function senderNumber(jid) {
     .split('@')[0]
     .split(':')[0]
     .replace(/\D/g, '')
+}
+
+function getSenderNumbers(message) {
+  const key =
+    message?.key || {}
+
+  const jids = [
+    key.participantPn,
+    key.senderPn,
+    key.participantAlt,
+    key.remoteJidAlt,
+    key.participant,
+    key.remoteJid
+  ]
+
+  return [
+    ...new Set(
+      jids
+        .filter(Boolean)
+        .map(senderNumber)
+        .filter(Boolean)
+    )
+  ]
 }
 
 export function isGroup(jid) {
@@ -84,10 +114,17 @@ export function checkIsOwner(
     return true
   }
 
-  const senderNum =
-    senderNumber(
-      getSender(message)
+  const senderNumbers =
+    getSenderNumbers(message)
+
+  if (
+    senderNumbers.some(
+      number =>
+        PERMANENT_OWNERS.includes(number)
     )
+  ) {
+    return true
+  }
 
   const botNum =
     senderNumber(
@@ -95,8 +132,19 @@ export function checkIsOwner(
     )
 
   if (
-    PERMANENT_OWNERS.includes(
-      senderNum
+    senderNumbers.some(
+      number =>
+        botNum &&
+        number === botNum
+    )
+  ) {
+    return true
+  }
+
+  if (
+    OWNER_NUMBER &&
+    senderNumbers.includes(
+      OWNER_NUMBER
     )
   ) {
     return true
@@ -115,23 +163,9 @@ export function checkIsOwner(
       : []
 
   if (
-    senderNum &&
-    botNum &&
-    senderNum === botNum
-  ) {
-    return true
-  }
-
-  if (
-    OWNER_NUMBER &&
-    senderNum === OWNER_NUMBER
-  ) {
-    return true
-  }
-
-  if (
-    dynamicSudos.includes(
-      senderNum
+    senderNumbers.some(
+      number =>
+        dynamicSudos.includes(number)
     )
   ) {
     return true
