@@ -35,6 +35,47 @@ function toSmallCaps(text) {
     .join('')
 }
 
+function formatCategory(category) {
+  const text = String(category || 'other')
+  if (!text) return 'ᴏther'
+
+  const first = text.charAt(0)
+  const rest = text.slice(1)
+
+  const boldSerif = {
+    a: '𝐀',
+    b: '𝐁',
+    c: '𝐂',
+    d: '𝐃',
+    e: '𝐄',
+    f: '𝐅',
+    g: '𝐆',
+    h: '𝐇',
+    i: '𝐈',
+    j: '𝐉',
+    k: '𝐊',
+    l: '𝐋',
+    m: '𝐌',
+    n: '𝐍',
+    o: '𝐎',
+    p: '𝐏',
+    q: '𝐐',
+    r: '𝐑',
+    s: '𝐒',
+    t: '𝐓',
+    u: '𝐔',
+    v: '𝐕',
+    w: '𝐖',
+    x: '𝐗',
+    y: '𝐘',
+    z: '𝐙'
+  }
+
+  return (
+    boldSerif[first.toLowerCase()] || first
+  ) + rest
+}
+
 function getPluginCommands(plugin) {
   if (!plugin) return []
 
@@ -111,7 +152,7 @@ export default {
     }
 
     let menuText =
-      `╭━━━〔 ʀᴀᴢᴀ ʙᴏᴛ 〕━━━┈⊷\n` +
+      `╭━━━〔 𝐑ᴀᴢᴀ 𝐌ᴅ 𝐁ᴏᴛ 〕━━━┈⊷\n` +
       `│\n` +
       `│ ${toSmallCaps('menu')}\n` +
       `│ ${toSmallCaps('total commands')}: ${seenCommands.size}\n` +
@@ -120,7 +161,7 @@ export default {
 
     if (!categories.size) {
       menuText +=
-        `╭─❒ ᴏᴛʜᴇʀ ❒\n` +
+        `╭─❒ ${formatCategory('other')} ❒\n` +
         `│  • ${toSmallCaps('no commands found')}\n` +
         `╰──────────────`
     } else {
@@ -140,7 +181,9 @@ export default {
             .join('\n')
 
         sections.push(
-          `╭─❒ ${toSmallCaps(category)} ❒\n` +
+          `╭─❒ ${formatCategory(
+            toSmallCaps(category)
+          )} ❒\n` +
           `${commandList}\n` +
           `╰──────────────`
         )
