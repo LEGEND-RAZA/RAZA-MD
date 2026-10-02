@@ -1,4 +1,4 @@
-limport {
+import {
   downloadMediaMessage
 } from '@whiskeysockets/baileys'
 
@@ -22,10 +22,7 @@ function loadWarns() {
     if (!fs.existsSync(WARN_FILE)) return {}
 
     return JSON.parse(
-      fs.readFileSync(
-        WARN_FILE,
-        'utf8'
-      )
+      fs.readFileSync(WARN_FILE, 'utf8')
     )
   } catch {
     return {}
@@ -35,11 +32,7 @@ function loadWarns() {
 function saveWarns(data) {
   fs.writeFileSync(
     WARN_FILE,
-    JSON.stringify(
-      data,
-      null,
-      2
-    )
+    JSON.stringify(data, null, 2)
   )
 }
 
@@ -76,39 +69,23 @@ function toSmallCaps(text) {
   return String(text || '')
     .toLowerCase()
     .split('')
-    .map(
-      c => map[c] || c
-    )
+    .map(c => map[c] || c)
     .join('')
 }
 
 function getQuotedMessage(message) {
-  const msg =
-    message.message || {}
-
-  const type =
-    Object.keys(msg)[0]
-
-  const context =
-    msg[type]?.contextInfo
+  const msg = message?.message || {}
+  const type = Object.keys(msg)[0]
+  const context = msg[type]?.contextInfo
 
   return context?.quotedMessage
     ? {
-        message:
-          context.quotedMessage,
-
+        message: context.quotedMessage,
         key: {
-          remoteJid:
-            message.key.remoteJid,
-
-          fromMe:
-            false,
-
-          id:
-            context.stanzaId,
-
-          participant:
-            context.participant
+          remoteJid: message.key.remoteJid,
+          fromMe: false,
+          id: context.stanzaId,
+          participant: context.participant
         }
       }
     : null
@@ -133,33 +110,20 @@ function extractText(msg) {
   )
 }
 
-function getTarget(
-  message,
-  args = []
-) {
-  const context =
-    message.message?.extendedTextMessage?.contextInfo ||
-    message.message?.imageMessage?.contextInfo ||
-    message.message?.videoMessage?.contextInfo ||
-    {}
+function getTarget(message, args = []) {
+  const msg = message?.message || {}
+  const type = Object.keys(msg)[0]
+  const context = msg[type]?.contextInfo || {}
 
   let target =
     context.mentionedJid?.[0] ||
     context.participant
 
-  if (
-    !target &&
-    args[0]
-  ) {
-    const number =
-      args[0].replace(
-        /\D/g,
-        ''
-      )
+  if (!target && args[0]) {
+    const number = args[0].replace(/\D/g, '')
 
     if (number) {
-      target =
-        `${number}@s.whatsapp.net`
+      target = `${number}@s.whatsapp.net`
     }
   }
 
@@ -167,31 +131,21 @@ function getTarget(
 }
 
 function getInviteCode(text) {
-  const match =
-    String(text || '').match(
-      /chat\.whatsapp\.com\/([0-9A-Za-z]{10,})/i
-    )
+  const match = String(text || '').match(
+    /chat\.whatsapp\.com\/([0-9A-Za-z]{10,})/i
+  )
 
   return match?.[1] || null
 }
 
 function normalizeGroupJid(value) {
-  const input =
-    String(value || '').trim()
+  const input = String(value || '').trim()
 
-  if (
-    /^\d{5,}-\d+@g\.us$/i.test(
-      input
-    )
-  ) {
+  if (/^\d{5,}-\d+@g\.us$/i.test(input)) {
     return input
   }
 
-  if (
-    /^\d{5,}-\d+$/i.test(
-      input
-    )
-  ) {
+  if (/^\d{5,}-\d+$/i.test(input)) {
     return `${input}@g.us`
   }
 
@@ -222,10 +176,10 @@ export default {
     'warns',
     'resetwarn'
   ],
+
   category: 'group',
 
-  description:
-    'Complete group management',
+  description: 'Complete group management',
 
   async run({
     sock,
@@ -237,8 +191,8 @@ export default {
     isOwner
   }) {
 
-    const jid =
-      message.key.remoteJid
+    const jid = message?.key?.remoteJid
+    if (!jid) return
 
     /*
      * =========================================================
@@ -246,52 +200,36 @@ export default {
      * =========================================================
      */
 
-    if (
-      command === 'join'
-    ) {
+    if (command === 'join') {
       if (!isOwner) return
 
-      const quoted =
-        getQuotedMessage(
-          message
-        )
-
-      const quotedText =
-        extractText(
-          quoted?.message
-        )
+      const quoted = getQuotedMessage(message)
+      const quotedText = extractText(quoted?.message)
 
       const link =
         text ||
         args.join(' ') ||
         quotedText
 
-      const inviteCode =
-        getInviteCode(
-          link
-        )
+      const inviteCode = getInviteCode(link)
 
       if (!inviteCode) {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `⚠️ ${toSmallCaps(
-                'provide a whatsapp group invite link or reply to a group link.'
-              )}`
+            text: `⚠️ ${toSmallCaps(
+              'provide a whatsapp group invite link or reply to a group link.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
 
       try {
         const groupJid =
-          await sock.groupAcceptInvite(
-            inviteCode
-          )
+          await sock.groupAcceptInvite(inviteCode)
 
         return await sock.sendMessage(
           jid,
@@ -302,28 +240,22 @@ export default {
               )}\n\n${groupJid || ''}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
 
       } catch (e) {
-        console.error(
-          '[JOIN ERROR]:',
-          e
-        )
+        console.error('[JOIN ERROR]:', e)
 
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'failed to join group. link may be invalid, expired, or restricted.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'failed to join group. link may be invalid, expired, or restricted.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
@@ -335,74 +267,54 @@ export default {
      * =========================================================
      */
 
-    if (
-      command === 'ginfo'
-    ) {
+    if (command === 'ginfo') {
       try {
         let targetJid = null
         let metadata = null
 
-        const input =
-          text?.trim()
+        const input = text?.trim()
 
         if (!input) {
           if (!isGroup) {
             return await sock.sendMessage(
               jid,
               {
-                text:
-                  `⚠️ ${toSmallCaps(
-                    'use ginfo inside a group or provide a group jid/link.'
-                  )}`
+                text: `⚠️ ${toSmallCaps(
+                  'use ginfo inside a group or provide a group jid/link.'
+                )}`
               },
               {
-                quoted:
-                  message
+                quoted: message
               }
             )
           }
 
-          targetJid =
-            jid
-
-          metadata =
-            await sock.groupMetadata(
-              targetJid
-            )
+          targetJid = jid
+          metadata = await sock.groupMetadata(targetJid)
 
         } else {
           const directJid =
-            normalizeGroupJid(
-              input
-            )
+            normalizeGroupJid(input)
 
           if (directJid) {
-            targetJid =
-              directJid
-
+            targetJid = directJid
             metadata =
-              await sock.groupMetadata(
-                targetJid
-              )
+              await sock.groupMetadata(targetJid)
 
           } else {
             const inviteCode =
-              getInviteCode(
-                input
-              )
+              getInviteCode(input)
 
             if (!inviteCode) {
               return await sock.sendMessage(
                 jid,
                 {
-                  text:
-                    `❌ ${toSmallCaps(
-                      'invalid group jid or invite link.'
-                    )}`
+                  text: `❌ ${toSmallCaps(
+                    'invalid group jid or invite link.'
+                  )}`
                 },
                 {
-                  quoted:
-                    message
+                  quoted: message
                 }
               )
             }
@@ -412,8 +324,7 @@ export default {
                 inviteCode
               )
 
-            targetJid =
-              metadata?.id
+            targetJid = metadata?.id
           }
         }
 
@@ -424,8 +335,7 @@ export default {
         }
 
         const participants =
-          metadata.participants ||
-          []
+          metadata.participants || []
 
         const admins =
           participants.filter(
@@ -438,16 +348,14 @@ export default {
           metadata.owner ||
           admins.find(
             p =>
-              p.admin ===
-              'superadmin'
+              p.admin === 'superadmin'
           )?.id ||
           'Unknown'
 
         const created =
           metadata.creation
             ? new Date(
-                metadata.creation *
-                  1000
+                metadata.creation * 1000
               ).toLocaleString()
             : 'Unknown'
 
@@ -463,49 +371,28 @@ export default {
             'group info'
           )} 〕━━━┈⊷\n` +
           `│\n` +
-          `│ ${toSmallCaps(
-            'name'
-          )}: ${
-            metadata.subject ||
-            'Unknown'
+          `│ ${toSmallCaps('name')}: ${
+            metadata.subject || 'Unknown'
           }\n` +
-          `│ ${toSmallCaps(
-            'jid'
-          )}: ${
-            targetJid ||
-            'Unknown'
+          `│ ${toSmallCaps('jid')}: ${
+            targetJid || 'Unknown'
           }\n` +
-          `│ ${toSmallCaps(
-            'type'
-          )}: ${type}\n` +
-          `│ ${toSmallCaps(
-            'members'
-          )}: ${
+          `│ ${toSmallCaps('type')}: ${type}\n` +
+          `│ ${toSmallCaps('members')}: ${
             participants.length
           }\n` +
-          `│ ${toSmallCaps(
-            'admins'
-          )}: ${
+          `│ ${toSmallCaps('admins')}: ${
             admins.length
           }\n` +
-          `│ ${toSmallCaps(
-            'owner'
-          )}: ${owner}\n` +
-          `│ ${toSmallCaps(
-            'created'
-          )}: ${created}\n` +
-          `│ ${toSmallCaps(
-            'join approval'
-          )}: ${
+          `│ ${toSmallCaps('owner')}: ${owner}\n` +
+          `│ ${toSmallCaps('created')}: ${created}\n` +
+          `│ ${toSmallCaps('join approval')}: ${
             metadata.joinApprovalMode
               ? 'On'
               : 'Off'
           }\n` +
-          `│ ${toSmallCaps(
-            'description'
-          )}: ${
-            metadata.desc ||
-            'None'
+          `│ ${toSmallCaps('description')}: ${
+            metadata.desc || 'None'
           }\n` +
           `│\n` +
           `╰━━━━━━━━━━━━━━━━━━━┈⊷`
@@ -529,12 +416,10 @@ export default {
               image: {
                 url: image
               },
-              caption:
-                info
+              caption: info
             },
             {
-              quoted:
-                message
+              quoted: message
             }
           )
         }
@@ -542,32 +427,25 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              info
+            text: info
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
 
       } catch (e) {
-        console.error(
-          '[GINFO ERROR]:',
-          e
-        )
+        console.error('[GINFO ERROR]:', e)
 
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'unable to fetch group information.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'unable to fetch group information.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
@@ -588,25 +466,20 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'this command can only be used in groups.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'this command can only be used in groups.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
 
       if (!isOwner) {
         const meta =
-          await sock.groupMetadata(
-            jid
-          ).catch(
-            () => null
-          )
+          await sock.groupMetadata(jid)
+            .catch(() => null)
 
         const sender =
           message.key.participant ||
@@ -614,8 +487,7 @@ export default {
 
         const senderData =
           meta?.participants?.find(
-            p =>
-              p.id === sender
+            p => p.id === sender
           )
 
         if (
@@ -625,14 +497,12 @@ export default {
           return await sock.sendMessage(
             jid,
             {
-              text:
-                `❌ ${toSmallCaps(
-                  'only group admins can approve requests.'
-                )}`
+              text: `❌ ${toSmallCaps(
+                'only group admins can approve requests.'
+              )}`
             },
             {
-              quoted:
-                message
+              quoted: message
             }
           )
         }
@@ -648,87 +518,63 @@ export default {
           return await sock.sendMessage(
             jid,
             {
-              text:
-                `ℹ️ ${toSmallCaps(
-                  'no pending join requests.'
-                )}`
+              text: `ℹ️ ${toSmallCaps(
+                'no pending join requests.'
+              )}`
             },
             {
-              quoted:
-                message
+              quoted: message
             }
           )
         }
 
-        let selected =
-          requests
+        let selected = requests
 
         const approveAll =
-          command ===
-            'approveall' ||
-          args[0]?.toLowerCase() ===
-            'all' ||
-          text?.trim().toLowerCase() ===
-            'all'
+          command === 'approveall' ||
+          args[0]?.toLowerCase() === 'all' ||
+          text?.trim().toLowerCase() === 'all'
 
         if (!approveAll) {
           const amount =
             parseInt(
-              args[0] ||
-              text,
+              args[0] || text,
               10
             )
 
-          if (
-            !amount ||
-            amount < 1
-          ) {
+          if (!amount || amount < 1) {
             return await sock.sendMessage(
               jid,
               {
-                text:
-                  `⚠️ ${toSmallCaps(
-                    'use approval followed by a number, for example: approval 20'
-                  )}`
+                text: `⚠️ ${toSmallCaps(
+                  'use approval followed by a number, for example: approval 20'
+                )}`
               },
               {
-                quoted:
-                  message
+                quoted: message
               }
             )
           }
 
           selected =
-            requests.slice(
-              0,
-              amount
-            )
+            requests.slice(0, amount)
         }
 
         const participants =
           selected
-            .map(
-              r =>
-                r.jid
-            )
-            .filter(
-              Boolean
-            )
+            .map(r => r.jid)
+            .filter(Boolean)
 
-        if (
-          !participants.length
-        ) {
+        if (!participants.length) {
           return await sock.sendMessage(
             jid,
             {
-              text:
-                `❌ ${toSmallCaps(
-                  'no valid pending requests found.'
-                )}`
+              text: `❌ ${toSmallCaps(
+                'no valid pending requests found.'
+              )}`
             },
             {
-              quoted:
-                message
+              quoted: message
             }
           )
         }
@@ -743,9 +589,7 @@ export default {
         const approved =
           result.filter(
             r =>
-              String(
-                r.status
-              ) === '200'
+              String(r.status) === '200'
           ).length
 
         return await sock.sendMessage(
@@ -757,27 +601,19 @@ export default {
               )}\n\n` +
               `╭─ ${toSmallCaps(
                 'requested'
-              )}: ${
-                participants.length
-              }\n` +
+              )}: ${participants.length}\n` +
               `├─ ${toSmallCaps(
                 'approved'
-              )}: ${
-                approved
-              }\n` +
+              )}: ${approved}\n` +
               `╰─ ${toSmallCaps(
                 'pending'
-              )}: ${
-                Math.max(
-                  requests.length -
-                    approved,
-                  0
-                )
-              }`
+              )}: ${Math.max(
+                requests.length - approved,
+                0
+              )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
 
@@ -790,14 +626,12 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'failed to process join requests. make sure the bot is an admin and join approval is enabled.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'failed to process join requests. make sure the bot is an admin and join approval is enabled.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
@@ -813,14 +647,12 @@ export default {
       return await sock.sendMessage(
         jid,
         {
-          text:
-            `❌ ${toSmallCaps(
-              'this command can only be used in groups.'
-            )}`
+          text: `❌ ${toSmallCaps(
+            'this command can only be used in groups.'
+          )}`
         },
         {
-          quoted:
-            message
+          quoted: message
         }
       )
     }
@@ -832,15 +664,10 @@ export default {
      */
 
     const groupMetadata =
-      await sock.groupMetadata(
-        jid
-      ).catch(
-        () => null
-      )
+      await sock.groupMetadata(jid)
+        .catch(() => null)
 
-    if (!groupMetadata) {
-      return
-    }
+    if (!groupMetadata) return
 
     const sender =
       message.key.participant ||
@@ -848,8 +675,7 @@ export default {
 
     const senderData =
       groupMetadata.participants.find(
-        p =>
-          p.id === sender
+        p => p.id === sender
       )
 
     const isAdmin =
@@ -858,12 +684,6 @@ export default {
     /*
      * =========================================================
      * INVITE / GROUPLINK
-     *
-     * Sends ONLY:
-     *
-     * https://chat.whatsapp.com/XXXXXXXX
-     *
-     * with link preview enabled.
      * =========================================================
      */
 
@@ -871,30 +691,23 @@ export default {
       command === 'invite' ||
       command === 'grouplink'
     ) {
-      if (
-        !isAdmin &&
-        !isOwner
-      ) {
+      if (!isAdmin && !isOwner) {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'only group admins can get the group invite.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'only group admins can get the group invite.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
 
       try {
         const code =
-          await sock.groupInviteCode(
-            jid
-          )
+          await sock.groupInviteCode(jid)
 
         if (!code) {
           throw new Error(
@@ -905,46 +718,32 @@ export default {
         const inviteLink =
           `https://chat.whatsapp.com/${code}`
 
-        /*
-         * Only the URL is sent.
-         *
-         * linkPreview: true
-         * asks WhatsApp/Baileys to
-         * generate the preview.
-         */
-
         return await sock.sendMessage(
           jid,
           {
-            text:
-              inviteLink,
-            linkPreview:
-              true
+            text: inviteLink,
+            linkPreview: true
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
 
       } catch (error) {
         console.error(
           '[GROUP INVITE ERROR]:',
-          error?.message ||
-          error
+          error?.message || error
         )
 
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'failed to get the group invite link. make sure the bot is an admin.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'failed to get the group invite link. make sure the bot is an admin.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
@@ -956,9 +755,7 @@ export default {
      * =========================================================
      */
 
-    if (
-      command === 'admins'
-    ) {
+    if (command === 'admins') {
       const admins =
         groupMetadata.participants.filter(
           p =>
@@ -970,23 +767,18 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `ℹ️ ${toSmallCaps(
-                'no admins found.'
-              )}`
+            text: `ℹ️ ${toSmallCaps(
+              'no admins found.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
 
       const mentions =
-        admins.map(
-          p =>
-            p.id
-        )
+        admins.map(p => p.id)
 
       const list =
         admins
@@ -1008,8 +800,7 @@ export default {
           mentions
         },
         {
-          quoted:
-            message
+          quoted: message
         }
       )
     }
@@ -1025,94 +816,72 @@ export default {
       command === 'warns' ||
       command === 'resetwarn'
     ) {
-      if (
-        !isAdmin &&
-        !isOwner
-      ) {
+      if (!isAdmin && !isOwner) {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'only group admins can manage warnings.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'only group admins can manage warnings.'
+            )}`
           },
           {
-            quoted:
-              message
-            }
-          )
+            quoted: message
+          }
         )
       }
 
       const target =
-        getTarget(
-          message,
-          args
-        )
+        getTarget(message, args)
 
       if (!target) {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `⚠️ ${toSmallCaps(
-                'mention a user or reply to their message.'
-              )}`
+            text: `⚠️ ${toSmallCaps(
+              'mention a user or reply to their message.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
 
       const targetData =
         groupMetadata.participants.find(
-          p =>
-            p.id === target
+          p => p.id === target
         )
 
       if (
-        targetData?.admin ===
-          'admin' ||
-        targetData?.admin ===
-          'superadmin'
+        targetData?.admin === 'admin' ||
+        targetData?.admin === 'superadmin'
       ) {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'you cannot warn a group admin.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'you cannot warn a group admin.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
 
-      const warns =
-        loadWarns()
+      const warns = loadWarns()
 
       if (!warns[jid]) {
         warns[jid] = {}
       }
 
-      if (
-        !warns[jid][target]
-      ) {
+      if (!warns[jid][target]) {
         warns[jid][target] = 0
       }
 
-      if (
-        command === 'warns'
-      ) {
+      if (command === 'warns') {
         const count =
-          warns[jid][target] ||
-          0
+          warns[jid][target] || 0
 
         return await sock.sendMessage(
           jid,
@@ -1122,26 +891,18 @@ export default {
               `${toSmallCaps(
                 'warnings'
               )}: ${count}/${WARN_LIMIT}`,
-            mentions: [
-              target
-            ]
+            mentions: [target]
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
 
-      if (
-        command === 'resetwarn'
-      ) {
-        warns[jid][target] =
-          0
+      if (command === 'resetwarn') {
+        warns[jid][target] = 0
 
-        saveWarns(
-          warns
-        )
+        saveWarns(warns)
 
         return await sock.sendMessage(
           jid,
@@ -1151,13 +912,10 @@ export default {
                 'warnings reset.'
               )}\n\n` +
               `@${target.split('@')[0]} → 0/${WARN_LIMIT}`,
-            mentions: [
-              target
-            ]
+            mentions: [target]
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
@@ -1167,14 +925,10 @@ export default {
       const count =
         warns[jid][target]
 
-      if (
-        count >= WARN_LIMIT
-      ) {
+      if (count >= WARN_LIMIT) {
         delete warns[jid][target]
 
-        saveWarns(
-          warns
-        )
+        saveWarns(warns)
 
         try {
           await sock.groupParticipantsUpdate(
@@ -1194,13 +948,10 @@ export default {
                 `${toSmallCaps(
                   `limit: ${WARN_LIMIT} warnings`
                 )}`,
-              mentions: [
-                target
-              ]
+              mentions: [target]
             },
             {
-              quoted:
-                message
+              quoted: message
             }
           )
 
@@ -1218,21 +969,16 @@ export default {
                 `${toSmallCaps(
                   'warning limit reached, but i could not remove the user. make sure the bot is an admin.'
                 )}`,
-              mentions: [
-                target
-              ]
+              mentions: [target]
             },
             {
-              quoted:
-                message
+              quoted: message
             }
           )
         }
       }
 
-      saveWarns(
-        warns
-      )
+      saveWarns(warns)
 
       return await sock.sendMessage(
         jid,
@@ -1245,13 +991,10 @@ export default {
             `${toSmallCaps(
               `warnings: ${count}/${WARN_LIMIT}`
             )}`,
-          mentions: [
-            target
-          ]
+          mentions: [target]
         },
         {
-          quoted:
-            message
+          quoted: message
         }
       )
     }
@@ -1262,21 +1005,16 @@ export default {
      * =========================================================
      */
 
-    if (
-      !isAdmin &&
-      !isOwner
-    ) {
+    if (!isAdmin && !isOwner) {
       return await sock.sendMessage(
         jid,
         {
-          text:
-            `❌ ${toSmallCaps(
-              'only group admins can use this command.'
-            )}`
+          text: `❌ ${toSmallCaps(
+            'only group admins can use this command.'
+          )}`
         },
         {
-          quoted:
-            message
+          quoted: message
         }
       )
     }
@@ -1287,24 +1025,18 @@ export default {
      * =========================================================
      */
 
-    if (
-      command === 'left'
-    ) {
+    if (command === 'left') {
       await sock.sendMessage(
         jid,
         {
-          text:
-            `👋 ${toSmallCaps(
-              'leaving group...'
-            )}`
+          text: `👋 ${toSmallCaps(
+            'leaving group...'
+          )}`
         }
       )
 
-      await sock.groupLeave(
-        jid
-      ).catch(
-        () => {}
-      )
+      await sock.groupLeave(jid)
+        .catch(() => {})
 
       return
     }
@@ -1342,12 +1074,10 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              statusText
+            text: statusText
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
 
@@ -1355,14 +1085,12 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'failed to update group settings. ensure bot is admin.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'failed to update group settings. ensure bot is admin.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
@@ -1380,33 +1108,26 @@ export default {
         'demote',
         'kick',
         'remove'
-      ].includes(
-        command
-      )
+      ].includes(command)
     ) {
       const target =
-        getTarget(
-          message,
-          args
-        )
+        getTarget(message, args)
 
       if (!target) {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `⚠️ ${toSmallCaps(
-                'please mention a user or reply to their message.'
-              )}`
+            text: `⚠️ ${toSmallCaps(
+              'please mention a user or reply to their message.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
 
-      let action =
+      const action =
         command === 'promote'
           ? 'promote'
           : command === 'demote'
@@ -1430,14 +1151,12 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `✅ ${toSmallCaps(
-                `user successfully ${actionText}.`
-              )}`
+            text: `✅ ${toSmallCaps(
+              `user successfully ${actionText}.`
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
 
@@ -1445,14 +1164,12 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'action failed. ensure bot is an admin.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'action failed. ensure bot is an admin.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
@@ -1464,21 +1181,17 @@ export default {
      * =========================================================
      */
 
-    if (
-      command === 'setgname'
-    ) {
+    if (command === 'setgname') {
       if (!text) {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `⚠️ ${toSmallCaps(
-                'please provide a new group name.'
-              )}`
+            text: `⚠️ ${toSmallCaps(
+              'please provide a new group name.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
@@ -1492,14 +1205,12 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `✅ ${toSmallCaps(
-                'group name successfully updated.'
-              )}`
+            text: `✅ ${toSmallCaps(
+              'group name successfully updated.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
 
@@ -1507,14 +1218,12 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'failed to update group name.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'failed to update group name.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
@@ -1526,21 +1235,17 @@ export default {
      * =========================================================
      */
 
-    if (
-      command === 'setgdesc'
-    ) {
+    if (command === 'setgdesc') {
       if (!text) {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `⚠️ ${toSmallCaps(
-                'please provide a new group description.'
-              )}`
+            text: `⚠️ ${toSmallCaps(
+              'please provide a new group description.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
@@ -1554,14 +1259,12 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `✅ ${toSmallCaps(
-                'group description successfully updated.'
-              )}`
+            text: `✅ ${toSmallCaps(
+              'group description successfully updated.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
 
@@ -1569,14 +1272,12 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'failed to update group description.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'failed to update group description.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
@@ -1588,46 +1289,37 @@ export default {
      * =========================================================
      */
 
-    if (
-      command === 'gpp'
-    ) {
+    if (command === 'gpp') {
       const quoted =
-        getQuotedMessage(
-          message
-        )
+        getQuotedMessage(message)
 
-      let targetMediaMessage =
-        null
+      let targetMediaMessage = null
 
       if (
         quoted?.message?.imageMessage ||
         quoted?.message?.ephemeralMessage?.message?.imageMessage ||
         quoted?.message?.viewOnceMessage?.message?.imageMessage
       ) {
-        targetMediaMessage =
-          quoted
+        targetMediaMessage = quoted
       }
 
       if (
         !targetMediaMessage &&
         message.message?.imageMessage
       ) {
-        targetMediaMessage =
-          message
+        targetMediaMessage = message
       }
 
       if (!targetMediaMessage) {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `⚠️ ${toSmallCaps(
-                'reply to an image with gpp to change the group picture.'
-              )}`
+            text: `⚠️ ${toSmallCaps(
+              'reply to an image with gpp to change the group picture.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
@@ -1648,14 +1340,12 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `✅ ${toSmallCaps(
-                'group profile picture successfully updated.'
-              )}`
+            text: `✅ ${toSmallCaps(
+              'group profile picture successfully updated.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
 
@@ -1668,14 +1358,12 @@ export default {
         return await sock.sendMessage(
           jid,
           {
-            text:
-              `❌ ${toSmallCaps(
-                'failed to update group picture. make sure bot is an admin.'
-              )}`
+            text: `❌ ${toSmallCaps(
+              'failed to update group picture. make sure bot is an admin.'
+            )}`
           },
           {
-            quoted:
-              message
+            quoted: message
           }
         )
       }
