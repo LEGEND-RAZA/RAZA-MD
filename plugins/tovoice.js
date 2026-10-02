@@ -8,6 +8,36 @@ import {
 
 const execFileAsync = promisify(execFile)
 
+function unwrapMessage(message) {
+  let current = message
+
+  for (let i = 0; i < 10 && current; i++) {
+    if (current.ephemeralMessage?.message) {
+      current = current.ephemeralMessage.message
+      continue
+    }
+
+    if (current.viewOnceMessage?.message) {
+      current = current.viewOnceMessage.message
+      continue
+    }
+
+    if (current.viewOnceMessageV2?.message) {
+      current = current.viewOnceMessageV2.message
+      continue
+    }
+
+    if (current.viewOnceMessageV2Extension?.message) {
+      current = current.viewOnceMessageV2Extension.message
+      continue
+    }
+
+    break
+  }
+
+  return current || {}
+}
+
 export default {
   command: ['tovn'],
   category: 'media',
@@ -27,15 +57,22 @@ export default {
 
     if (!jid) return
 
-    try {
-      const context =
-        message?.message?.extendedTextMessage?.contextInfo ||
-        message?.message?.imageMessage?.contextInfo ||
-        message?.message?.videoMessage?.contextInfo ||
-        message?.message?.audioMessage?.contextInfo ||
-        message?.message?.documentMessage?.contextInfo
+    let inputPath = ''
+    let outputPath = ''
 
-      const quoted =
+    try {
+      const msg =
+        message?.message || {}
+
+      const context =
+        msg?.extendedTextMessage?.contextInfo ||
+        msg?.imageMessage?.contextInfo ||
+        msg?.videoMessage?.contextInfo ||
+        msg?.audioMessage?.contextInfo ||
+        msg?.documentMessage?.contextInfo ||
+        msg?.ephemeralMessage?.message?.extendedTextMessage?.contextInfo
+
+      let quoted =
         context?.quotedMessage
 
       if (!quoted) {
@@ -51,18 +88,21 @@ export default {
         )
       }
 
+      quoted =
+        unwrapMessage(quoted)
+
       const audio =
-        quoted.audioMessage
+        quoted?.audioMessage
 
       const video =
-        quoted.videoMessage
+        quoted?.videoMessage
 
       if (!audio && !video) {
         return await sock.sendMessage(
           jid,
           {
             text:
-              '❌ 𝐑ᴇᴘʟʏ 𝐓ᴏ 𝐀ᴜᴅɪᴏ/𝐕ɪᴅᴇ𝐨 𝐎ɴʟʏ'
+              '❌ 𝐑ᴇᴘʟʏ 𝐓ᴏ 𝐀ᴜᴅɪᴏ/𝐕ɪᴅᴇᴏ 𝐎ɴʟʏ'
           },
           {
             quoted: message
@@ -76,27 +116,25 @@ export default {
           'tmp'
         )
 
-      if (!fs.existsSync(tempDir)) {
-        fs.mkdirSync(
-          tempDir,
-          {
-            recursive: true
-          }
-        )
-      }
+      fs.mkdirSync(
+        tempDir,
+        {
+          recursive: true
+        }
+      )
 
       const id =
         `${Date.now()}_${Math.random()
           .toString(36)
           .slice(2)}`
 
-      const inputPath =
+      inputPath =
         path.join(
           tempDir,
           `${id}.input`
         )
 
-      const outputPath =
+      outputPath =
         path.join(
           tempDir,
           `${id}.ogg`
@@ -106,7 +144,9 @@ export default {
         audio || video
 
       const mediaType =
-        audio ? 'audio' : 'video'
+        audio
+          ? 'audio'
+          : 'video'
 
       const stream =
         await downloadContentFromMessage(
@@ -116,13 +156,24 @@ export default {
 
       const chunks = []
 
-      for await (const chunk of stream) {
+      for await (
+        const chunk of stream
+      ) {
         chunks.push(chunk)
+      }
+
+      const buffer =
+        Buffer.concat(chunks)
+
+      if (!buffer.length) {
+        throw new Error(
+          'Downloaded media is empty'
+        )
       }
 
       fs.writeFileSync(
         inputPath,
-        Buffer.concat(chunks)
+        buffer
       )
 
       await execFileAsync(
@@ -132,20 +183,46 @@ export default {
           '-i',
           inputPath,
           '-vn',
+          '-map',
+          '0:a:0',
+          '-ac',
+          '1',
+          '-ar',
+          '48000',
           '-c:a',
           'libopus',
           '-b:a',
-          '128k',
+          '64k',
           '-application',
           'voip',
+          '-f',
+          'ogg',
           outputPath
-        ]
+        ],
+        {
+          maxBuffer:
+            10 * 1024 * 1024
+        }
       )
+
+      if (
+        !fs.existsSync(outputPath)
+      ) {
+        throw new Error(
+          'FFmpeg did not create output file'
+        )
+      }
 
       const output =
         fs.readFileSync(
           outputPath
         )
+
+      if (!output.length) {
+        throw new Error(
+          'Converted audio is empty'
+        )
+      }
 
       await sock.sendMessage(
         jid,
@@ -160,23 +237,15 @@ export default {
         }
       )
 
-      try {
-        fs.unlinkSync(inputPath)
-      } catch {}
-
-      try {
-        fs.unlinkSync(outputPath)
-      } catch {}
-
     } catch (error) {
       console.error(
         '[TOVN]',
         error?.stack ||
-          error?.message ||
-          error
+        error?.message ||
+        error
       )
 
-      return await sock.sendMessage(
+      await sock.sendMessage(
         jid,
         {
           text:
@@ -186,6 +255,23 @@ export default {
           quoted: message
         }
       )
+
+    } finally {
+      if (inputPath) {
+        try {
+          fs.unlinkSync(
+            inputPath
+          )
+        } catch {}
+      }
+
+      if (outputPath) {
+        try {
+          fs.unlinkSync(
+            outputPath
+          )
+        } catch {}
+      }
     }
   }
 }
