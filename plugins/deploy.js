@@ -73,6 +73,10 @@ export default {
 
       let created = false
 
+      /*
+       * CREATE APP
+       */
+
       if (appResponse.status === 404) {
         const createResponse = await fetch(
           `${apiRoot}/apps`,
@@ -125,6 +129,10 @@ export default {
       const apiBase =
         `${apiRoot}/apps/${encodeURIComponent(actualAppName)}`
 
+      /*
+       * START MESSAGE
+       */
+
       await sock.sendMessage(
         jid,
         {
@@ -140,7 +148,10 @@ export default {
         { quoted: message }
       )
 
-      // Set config vars
+      /*
+       * CONFIG VARS
+       */
+
       const configResponse = await fetch(
         `${apiBase}/config-vars`,
         {
@@ -165,7 +176,10 @@ export default {
         )
       }
 
-      // Start build
+      /*
+       * BUILD
+       */
+
       const buildResponse = await fetch(
         `${apiBase}/builds`,
         {
@@ -195,24 +209,28 @@ export default {
       const buildId =
         buildData?.id || 'unknown'
 
-      // Configure worker formation
+      /*
+       * WORKER FORMATION
+       *
+       * Heroku requires an object with
+       * process types as keys.
+       */
+
       const formationResponse = await fetch(
         `${apiBase}/formation`,
         {
           method: 'PATCH',
           headers,
-          body: JSON.stringify([
-            {
-              type: 'worker',
+          body: JSON.stringify({
+            worker: {
               quantity: 1,
               size: 'basic'
             },
-            {
-              type: 'web',
+            web: {
               quantity: 0,
               size: 'basic'
             }
-          ])
+          })
         }
       )
 
@@ -227,6 +245,10 @@ export default {
         )
       }
 
+      /*
+       * SUCCESS
+       */
+
       await sock.sendMessage(
         jid,
         {
@@ -239,6 +261,7 @@ export default {
             '⚙️ ᴘʀᴏᴄᴇss: ᴡᴏʀᴋᴇʀ\n' +
             '▶️ ᴄᴏᴍᴍᴀɴᴅ: ɴᴏᴅᴇ ɪɴᴅᴇx.ᴊs\n' +
             '🌐 ᴡᴇʙ: ᴅɪsᴀʙʟᴇᴅ\n' +
+            '🔢 ᴡᴏʀᴋᴇʀ: 1\n' +
             `📊 sᴛᴀᴛᴜs: ${buildData?.status || 'pending'}\n\n` +
             '🔄 ʀᴀᴢᴀ-ᴍᴅ ᴡɪʟʟ ʀᴜɴ ᴀs ᴀ ᴡᴏʀᴋᴇʀ.'
         },
