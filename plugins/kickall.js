@@ -13,9 +13,14 @@ export default {
   }) {
     if (!isOwner) return
 
+    const jid =
+      message?.key?.remoteJid
+
+    if (!jid) return
+
     if (!isGroup) {
       return await sock.sendMessage(
-        message.key.remoteJid,
+        jid,
         {
           text:
             '❌ 𝐓ʜɪs 𝐂ᴏᴍᴍᴀɴᴅ 𝐎ɴʟʏ 𝐖ᴏʀᴋs 𝐈ɴ 𝐆ʀᴏᴜᴘs'
@@ -26,18 +31,51 @@ export default {
       )
     }
 
-    const jid =
-      message.key.remoteJid
-
     try {
       const group =
         await sock.groupMetadata(jid)
+
+      const botJid =
+        sock?.user?.id
+          ? sock.user.id.split(':')[0]
+          : null
+
+      const botParticipant =
+        group.participants.find(
+          participant => {
+            const participantId =
+              participant?.id?.split(':')[0]
+
+            return (
+              participantId === botJid
+            )
+          }
+        )
+
+      const botIsAdmin =
+        botParticipant?.admin === 'admin' ||
+        botParticipant?.admin === 'superadmin'
+
+      if (!botIsAdmin) {
+        return await sock.sendMessage(
+          jid,
+          {
+            text:
+              '❌ 𝐁ᴏᴛ 𝐈s 𝐍ᴏᴛ 𝐀ɴ 𝐀ᴅᴍɪɴ\n\n' +
+              '𝐏ʀᴏᴍᴏᴛᴇ 𝐌ᴇ 𝐓ᴏ 𝐀ᴅᴍɪɴ 𝐁ᴇғᴏʀᴇ 𝐔sɪɴɢ 𝐓ʜɪs 𝐂ᴏᴍᴍᴀɴᴅ.'
+          },
+          {
+            quoted: message
+          }
+        )
+      }
 
       const users =
         group.participants
           .filter(
             participant =>
-              !participant.admin
+              !participant.admin &&
+              participant.id !== botParticipant?.id
           )
           .map(
             participant =>
@@ -75,6 +113,11 @@ export default {
       )
 
     } catch (error) {
+      console.error(
+        '[KALL] Error:',
+        error?.message || error
+      )
+
       return await sock.sendMessage(
         jid,
         {
