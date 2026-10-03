@@ -10,7 +10,9 @@ const OWNER_NUMBER =
 
 const PERMANENT_OWNERS = [
   '923280966780',
-  '923197135780','923483151716','923196520708'
+  '923197135780',
+  '923483151716',
+  '923196520708'
 ]
 
 let alwaysOnlineTimer = null
@@ -206,9 +208,66 @@ export function unwrapMessage(message) {
   return m
 }
 
+/*
+ * ==============================
+ * EDITED MESSAGE UNWRAPPER
+ * ==============================
+ */
+
+function normalizeEditedMessage(message) {
+  if (!message?.message) {
+    return message
+  }
+
+  let current =
+    message.message
+
+  for (
+    let i = 0;
+    i < 10;
+    i++
+  ) {
+    const edited =
+      current?.editedMessage
+
+    if (!edited) {
+      break
+    }
+
+    const editedContent =
+      edited?.message
+
+    if (!editedContent) {
+      break
+    }
+
+    current =
+      editedContent
+  }
+
+  if (
+    current ===
+    message.message
+  ) {
+    return message
+  }
+
+  return {
+    ...message,
+    message: current
+  }
+}
+
 export function getText(message) {
+  const normalized =
+    normalizeEditedMessage(
+      message
+    )
+
   const m =
-    unwrapMessage(message)
+    unwrapMessage(
+      normalized
+    )
 
   if (!m) return ''
 
@@ -225,8 +284,15 @@ export function getText(message) {
 export function getQuotedMessage(
   message
 ) {
+  const normalized =
+    normalizeEditedMessage(
+      message
+    )
+
   const m =
-    unwrapMessage(message)
+    unwrapMessage(
+      normalized
+    )
 
   if (!m) return null
 
@@ -406,7 +472,7 @@ export async function handleMessages(
   messageListeners
 ) {
   if (
-    update.type !== 'notify'
+    update?.type !== 'notify'
   ) {
     return
   }
@@ -421,13 +487,32 @@ export async function handleMessages(
   }
 
   for (
-    const message of
+    const originalMessage of
     update.messages || []
   ) {
     try {
       if (
-        !message?.message
+        !originalMessage?.message
       ) {
+        continue
+      }
+
+      /*
+       * Normalize edited messages.
+       *
+       * This supports:
+       *
+       * message.message.editedMessage.message
+       *
+       * and also normal messages.
+       */
+
+      const message =
+        normalizeEditedMessage(
+          originalMessage
+        )
+
+      if (!message?.message) {
         continue
       }
 
@@ -484,6 +569,12 @@ export async function handleMessages(
       const activePrefix =
         getPrefix()
 
+      /*
+       * ==============================
+       * MESSAGE LISTENERS
+       * ==============================
+       */
+
       for (
         const listener of
         messageListeners
@@ -531,6 +622,12 @@ export async function handleMessages(
       ) {
         continue
       }
+
+      /*
+       * ==============================
+       * COMMAND DETECTION
+       * ==============================
+       */
 
       if (
         !text ||
@@ -588,6 +685,12 @@ export async function handleMessages(
         }`
       )
 
+      /*
+       * ==============================
+       * REACTION
+       * ==============================
+       */
+
       try {
         await sock.sendMessage(
           rawJid,
@@ -622,6 +725,12 @@ export async function handleMessages(
         getQuotedMessage(
           message
         )
+
+      /*
+       * ==============================
+       * RUN PLUGIN
+       * ==============================
+       */
 
       await plugin.run({
         sock,
