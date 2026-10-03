@@ -517,28 +517,20 @@ async function connect() {
       'messages.update',
       async updates => {
         try {
-          for (
-            const item of
-            updates || []
-          ) {
-            const protocolMessage =
+          for (const item of updates || []) {
+            const editedContent =
               item?.update
                 ?.message
-                ?.protocolMessage
+                ?.editedMessage
+                ?.message
 
-            if (
-              !protocolMessage?.editedMessage ||
-              !protocolMessage?.key
-            ) {
+            if (!editedContent) {
               continue
             }
 
             const editedMessage = {
-              key:
-                protocolMessage.key,
-
-              message:
-                protocolMessage.editedMessage,
+              key: item?.key || {},
+              message: editedContent,
 
               pushName:
                 item?.update?.pushName ||
@@ -546,11 +538,17 @@ async function connect() {
                 undefined,
 
               messageTimestamp:
-                item?.update
-                  ?.messageTimestamp ||
+                item?.update?.messageTimestamp ||
                 item?.messageTimestamp ||
                 undefined
             }
+
+            console.log(
+              `[WA] Edited message detected: ${
+                editedMessage.key?.remoteJid ||
+                'unknown'
+              }`
+            )
 
             await handleMessages(
               {
