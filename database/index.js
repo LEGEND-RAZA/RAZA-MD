@@ -1,40 +1,115 @@
-import fs from 'node:fs'
-import path from 'node:path'
+import mysql from 'mysql2/promise'
 
-const DB_DIR = path.join(process.cwd(), 'database')
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  port: Number(process.env.DB_PORT || 3306),
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_NAME || 'defaultdb',
+  ssl: {
+    rejectUnauthorized: false
+  },
+  waitForConnections: true,
+  connectionLimit: 5,
+  queueLimit: 0
+})
 
-// Ensure directory exists
-if (!fs.existsSync(DB_DIR)) {
-  fs.mkdirSync(DB_DIR, { recursive: true })
+const cache = new Map()
+const saveQueues = new Map()
+
+await pool.execute(`
+  CREATE TABLE IF NOT EXISTS bot_database (
+    filename VARCHAR(255) NOT NULL PRIMARY KEY,
+    data JSON NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      ON UPDATE CURRENT_TIMESTAMP
+  )
+`)
+
+const [rows] = await pool.execute(
+  'SELECT filename, data FROM bot_database'
+)
+
+for (const row of rows) {
+  try {
+    cache.set(
+      row.filename,
+      typeof row.data === 'string'
+        ? JSON.parse(row.data)
+        : row.data
+    )
+  } catch (err) {
+    console.error(
+      `[DB LOAD ERROR] ${row.filename}:`,
+      err.message
+    )
+  }
 }
 
+console.log(`[DB] MySQL connected: ${rows.length} database entries loaded`)
+
 /**
- * Reads data from a JSON file in the database directory
+ * Reads data from MySQL
  */
 export function getDb(filename, defaultData = {}) {
-  const filePath = path.join(DB_DIR, filename.endsWith('.json') ? filename : `${filename}.json`)
-  try {
-    if (!fs.existsSync(filePath)) {
-      fs.writeFileSync(filePath, JSON.stringify(defaultData, null, 2))
-      return defaultData
-    }
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'))
-  } catch (err) {
-    console.error(`[DB READ ERROR] ${filename}:`, err.message)
-    return defaultData
+  const key = filename.endsWith('.json')
+    ? filename
+    : `${filename}.json`
+
+  if (!cache.has(key)) {
+    cache.set(key, structuredClone(defaultData))
+
+    saveDb(key, defaultData)
   }
+
+  return cache.get(key)
 }
 
 /**
- * Saves data to a JSON file in the database directory
+ * Saves data to MySQL
  */
 export function saveDb(filename, data) {
-  const filePath = path.join(DB_DIR, filename.endsWith('.json') ? filename : `${filename}.json`)
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2))
-    return true
-  } catch (err) {
-    console.error(`[DB SAVE ERROR] ${filename}:`, err.message)
-    return false
-  }
+  const key = filename.endsWith('.json')
+    ? filename
+    : `${filename}.json`
+
+  cache.set(key, data)
+
+  const previousSave = saveQueues.get(key) || Promise.resolve()
+
+  const currentSave = previousSave
+    .catch(() => {})
+    .then(async () => {
+      try {
+        await pool.execute(
+          `
+          INSERT INTO bot_database (filename, data)
+          VALUES (?, ?)
+          ON DUPLICATE KEY UPDATE
+            data = VALUES(data),
+            updated_at = CURRENT_TIMESTAMP
+          `,
+          [
+            key,
+            JSON.stringify(data)
+          ]
+        )
+      } catch (err) {
+        console.error(
+          `[DB SAVE ERROR] ${key}:`,
+          err.message
+        )
+      }
+    })
+
+  saveQueues.set(key, currentSave)
+
+  return true
+}
+
+/**
+ * Closes MySQL connection
+ */
+export async function closeDb() {
+  await pool.end()
 }
