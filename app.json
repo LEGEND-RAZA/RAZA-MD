@@ -38,6 +38,31 @@
       "description": "Heroku app name for GitHub updates",
       "required": false,
       "value": ""
+    },
+    "DB_HOST": {
+      "description": "Aiven MySQL database host",
+      "required": true,
+      "value": "mysql-raza123-innoxcentraza-9801.c.aivencloud.com"
+    },
+    "DB_PORT": {
+      "description": "Aiven MySQL database port",
+      "required": true,
+      "value": "19244"
+    },
+    "DB_NAME": {
+      "description": "Aiven MySQL database name",
+      "required": true,
+      "value": "defaultdb"
+    },
+    "DB_USER": {
+      "description": "Aiven MySQL database user",
+      "required": true,
+      "value": "avnadmin"
+    },
+    "DB_PASSWORD": {
+      "description": "Aiven MySQL database password",
+      "required": true,
+      "value": "AVNS_bNdClU_igW6ULgky-vH"
     }
   },
   "formation": {
