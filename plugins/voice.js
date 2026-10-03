@@ -4,6 +4,66 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 
+function isRomanText(text) {
+  return /^[\x00-\x7F\s\d.,!?'"()\-_:;@#$%&*+/=]+$/.test(text)
+}
+
+async function romanToUrdu(text) {
+  if (!text || !isRomanText(text)) {
+    return text
+  }
+
+  try {
+    const url =
+      'https://inputtools.google.com/request' +
+      `?text=${encodeURIComponent(text)}` +
+      '&itc=ur-t-i0-und' +
+      '&num=1' +
+      '&cp=0' +
+      '&cs=1' +
+      '&ie=utf-8' +
+      '&oe=utf-8' +
+      '&app=chat'
+
+    const response =
+      await fetch(url)
+
+    if (!response.ok) {
+      return text
+    }
+
+    const data =
+      await response.json()
+
+    if (
+      data?.[0] !== 'SUCCESS' ||
+      !Array.isArray(data?.[1])
+    ) {
+      return text
+    }
+
+    const converted =
+      data[1]
+        .map(item =>
+          Array.isArray(item?.[1])
+            ? item[1][0]
+            : ''
+        )
+        .filter(Boolean)
+        .join(' ')
+
+    return converted || text
+
+  } catch (error) {
+    console.error(
+      '[ROMAN URDU] Error:',
+      error?.message || error
+    )
+
+    return text
+  }
+}
+
 function convertToOpus(input, output) {
   return new Promise((resolve, reject) => {
     const ffmpeg = spawn(ffmpegPath, [
@@ -23,31 +83,41 @@ function convertToOpus(input, output) {
 
     let errorOutput = ''
 
-    ffmpeg.stderr.on('data', data => {
-      errorOutput += data.toString()
-    })
-
-    ffmpeg.on('error', reject)
-
-    ffmpeg.on('close', code => {
-      if (code === 0) {
-        resolve()
-      } else {
-        reject(
-          new Error(
-            errorOutput ||
-            `FFmpeg exited with code ${code}`
-          )
-        )
+    ffmpeg.stderr.on(
+      'data',
+      data => {
+        errorOutput += data.toString()
       }
-    })
+    )
+
+    ffmpeg.on(
+      'error',
+      reject
+    )
+
+    ffmpeg.on(
+      'close',
+      code => {
+        if (code === 0) {
+          resolve()
+        } else {
+          reject(
+            new Error(
+              errorOutput ||
+              `FFmpeg exited with code ${code}`
+            )
+          )
+        }
+      }
+    )
   })
 }
 
 export default {
   command: ['voice', 'tts'],
   category: 'ai',
-  description: 'Generate natural female AI voice',
+  description:
+    'Generate natural Urdu female AI voice',
 
   async run({
     sock,
@@ -60,7 +130,9 @@ export default {
     if (!jid) return
 
     const text =
-      args?.join(' ')?.trim()
+      args
+        ?.join(' ')
+        ?.trim()
 
     if (!text) {
       return await sock.sendMessage(
@@ -68,8 +140,8 @@ export default {
         {
           text:
             '❌ ᴘʟᴇᴀsᴇ ᴘʀᴏᴠɪᴅᴇ sᴏᴍᴇ ᴛᴇxᴛ.\n\n' +
-            'ᴜsᴀɢᴇ:\n' +
-            '.ᴠᴏɪᴄᴇ ʜᴇʟʟᴏ, ʜᴏᴡ ᴀʀᴇ ʏᴏᴜ?'
+            'ᴇxᴀᴍᴘʟᴇ:\n' +
+            '.ᴠᴏɪᴄᴇ ᴍᴜᴊʜᴇ ᴀᴀᴘ sᴇ ᴇᴋ ʙᴀᴀᴛ ᴋᴀʀɴɪ ʜᴀɪ'
         },
         { quoted: message }
       )
@@ -87,7 +159,9 @@ export default {
     }
 
     const id =
-      `${Date.now()}_${Math.random().toString(36).slice(2)}`
+      `${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2)}`
 
     const inputFile =
       path.join(
@@ -106,9 +180,31 @@ export default {
         jid,
         {
           text:
-            '🎙️ ɢᴇɴᴇʀᴀᴛɪɴɢ ᴠᴏɪᴄᴇ...'
+            '🎙️ ᴜʀᴅᴜ ғᴇᴍᴀʟᴇ ᴠᴏɪᴄᴇ ɢᴇɴᴇʀᴀᴛɪɴɢ...'
         },
         { quoted: message }
+      )
+
+      /*
+       * Roman Urdu → Urdu
+       *
+       * Example:
+       * "mujhe aap se ek baat karni hai"
+       *
+       * becomes:
+       * "مجھے آپ سے ایک بات کرنی ہے"
+       */
+      const urduText =
+        await romanToUrdu(text)
+
+      console.log(
+        '[VOICE] Input:',
+        text
+      )
+
+      console.log(
+        '[VOICE] Urdu:',
+        urduText
       )
 
       const response =
@@ -121,90 +217,117 @@ export default {
                 'application/json'
             },
             body: JSON.stringify({
-              model: 'kokoro',
-              voice: 'af_bella',
-              text,
+              model: 'piper',
+              voice: 'Aegis',
+              text: urduText,
               format: 'mp3',
-              speed: 1
+              speed: 1.0,
+              language: 'ur'
             })
           }
         )
 
       if (!response.ok) {
+        const errorText =
+          await response.text()
+
         throw new Error(
-          `TTS API returned ${response.status}`
+          `TTS API ${response.status}: ${errorText}`
         )
       }
 
-      const job =
-        await response.json()
+      const contentType =
+        response.headers.get(
+          'content-type'
+        ) || ''
 
-      if (!job?.uuid) {
-        throw new Error(
-          'TTS job ID was not returned'
+      let mp3
+
+      if (
+        contentType.includes(
+          'application/json'
         )
-      }
+      ) {
+        const data =
+          await response.json()
 
-      let result = null
-
-      for (let i = 0; i < 40; i++) {
-        await new Promise(
-          resolve =>
-            setTimeout(resolve, 1500)
-        )
-
-        const statusResponse =
-          await fetch(
-            `https://api.tts.ai/v1/speech/results/?uuid=${encodeURIComponent(job.uuid)}`
-          )
-
-        if (!statusResponse.ok) continue
-
-        const status =
-          await statusResponse.json()
-
-        if (
-          status.status ===
-          'completed'
-        ) {
-          result = status
-          break
-        }
-
-        if (
-          status.status ===
-          'failed'
-        ) {
+        if (!data?.uuid) {
           throw new Error(
-            status.error ||
-            'TTS generation failed'
+            'TTS job ID was not returned'
           )
         }
+
+        let result = null
+
+        for (let i = 0; i < 40; i++) {
+          await new Promise(
+            resolve =>
+              setTimeout(
+                resolve,
+                1500
+              )
+          )
+
+          const statusResponse =
+            await fetch(
+              `https://api.tts.ai/v1/speech/results/?uuid=${encodeURIComponent(data.uuid)}`
+            )
+
+          if (!statusResponse.ok) {
+            continue
+          }
+
+          const status =
+            await statusResponse.json()
+
+          if (
+            status.status ===
+            'completed'
+          ) {
+            result = status
+            break
+          }
+
+          if (
+            status.status ===
+            'failed'
+          ) {
+            throw new Error(
+              status.error ||
+              'TTS generation failed'
+            )
+          }
+        }
+
+        if (!result?.result_url) {
+          throw new Error(
+            'TTS generation timed out'
+          )
+        }
+
+        const audioResponse =
+          await fetch(
+            result.result_url
+          )
+
+        if (!audioResponse.ok) {
+          throw new Error(
+            'Failed to download generated audio'
+          )
+        }
+
+        mp3 =
+          Buffer.from(
+            await audioResponse.arrayBuffer()
+          )
+      } else {
+        mp3 =
+          Buffer.from(
+            await response.arrayBuffer()
+          )
       }
 
-      if (!result?.result_url) {
-        throw new Error(
-          'TTS generation timed out'
-        )
-      }
-
-      const audioResponse =
-        await fetch(
-          result.result_url
-        )
-
-      if (!audioResponse.ok) {
-        throw new Error(
-          'Failed to download TTS audio'
-        )
-      }
-
-      const mp3 =
-        Buffer.from(
-          await audioResponse.arrayBuffer()
-        )
-
-      if (!mp3.length) {
+      if (!mp3?.length) {
         throw new Error(
           'TTS returned empty audio'
         )
@@ -244,7 +367,7 @@ export default {
 
     } catch (error) {
       console.error(
-        '[VOICE]',
+        '[VOICE] Error:',
         error?.message || error
       )
 
@@ -252,7 +375,7 @@ export default {
         jid,
         {
           text:
-            '❌ ᴠᴏɪᴄᴇ ɢᴇɴᴇʀᴀᴛɪᴏɴ ғᴀɪʟᴇᴅ\n\n' +
+            '❌ ᴜʀᴅᴜ ᴠᴏɪᴄᴇ ғᴀɪʟᴇᴅ\n\n' +
             `${error?.message || error}`
         },
         { quoted: message }
