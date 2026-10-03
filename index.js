@@ -517,35 +517,141 @@ async function connect() {
       'messages.update',
       async updates => {
         try {
-          for (const item of updates || []) {
-            const editedContent =
-              item?.update
-                ?.message
+          for (
+            const item of
+            updates || []
+          ) {
+            const update =
+              item?.update || {}
+
+            let editedMessage = null
+
+            /*
+             * Baileys processed edit format
+             */
+
+            if (
+              update?.message
                 ?.editedMessage
                 ?.message
+            ) {
+              editedMessage = {
+                ...item,
 
-            if (!editedContent) {
-              continue
+                message:
+                  update
+                    .message
+                    .editedMessage
+                    .message
+              }
             }
 
-            const editedMessage = {
-              key: item?.key || {},
-              message: editedContent,
+            /*
+             * Alternative processed format
+             */
 
-              pushName:
-                item?.update?.pushName ||
-                item?.pushName ||
-                undefined,
+            else if (
+              update?.editedMessage
+                ?.message
+            ) {
+              editedMessage = {
+                ...item,
 
-              messageTimestamp:
-                item?.update?.messageTimestamp ||
-                item?.messageTimestamp ||
-                undefined
+                message:
+                  update
+                    .editedMessage
+                    .message
+              }
+            }
+
+            /*
+             * Protocol-message format
+             */
+
+            else if (
+              update?.message
+                ?.protocolMessage
+                ?.editedMessage
+            ) {
+              const protocol =
+                update
+                  .message
+                  .protocolMessage
+
+              const originalKey =
+                protocol.key ||
+                item.key
+
+              const content =
+                protocol
+                  .editedMessage
+                  ?.message
+
+              if (
+                content
+              ) {
+                editedMessage = {
+                  ...item,
+
+                  key:
+                    originalKey,
+
+                  message:
+                    content
+                }
+              }
+            }
+
+            /*
+             * Another possible nested
+             * protocol format
+             */
+
+            else if (
+              update
+                ?.protocolMessage
+                ?.editedMessage
+            ) {
+              const protocol =
+                update
+                  .protocolMessage
+
+              const originalKey =
+                protocol.key ||
+                item.key
+
+              const content =
+                protocol
+                  .editedMessage
+                  ?.message
+
+              if (
+                content
+              ) {
+                editedMessage = {
+                  ...item,
+
+                  key:
+                    originalKey,
+
+                  message:
+                    content
+                }
+              }
+            }
+
+            if (
+              !editedMessage
+                ?.message
+            ) {
+              continue
             }
 
             console.log(
               `[WA] Edited message detected: ${
-                editedMessage.key?.remoteJid ||
+                editedMessage
+                  ?.key
+                  ?.remoteJid ||
                 'unknown'
               }`
             )
