@@ -54,12 +54,8 @@ const logger =
   })
 
 let sock = null
-
-let reconnecting =
-  false
-
-let activeMessageSent =
-  false
+let reconnecting = false
+let activeMessageSent = false
 
 const SUPPORT_CHANNEL =
   '0029VbDLmtj0VycIgtiOTO1i'
@@ -99,6 +95,211 @@ function decodeBase64(
     value,
     'base64'
   )
+}
+
+/*
+ * ==============================
+ * EDIT MESSAGE FINDER
+ * ==============================
+ */
+
+function findEditedMessage(
+  value,
+  depth = 0,
+  seen = new Set()
+) {
+  if (
+    value === null ||
+    value === undefined
+  ) {
+    return null
+  }
+
+  if (
+    depth > 12
+  ) {
+    return null
+  }
+
+  if (
+    typeof value !==
+      'object'
+  ) {
+    return null
+  }
+
+  if (
+    seen.has(value)
+  ) {
+    return null
+  }
+
+  seen.add(value)
+
+  if (
+    value.editedMessage
+  ) {
+    const edited =
+      value.editedMessage
+
+    if (
+      edited?.message
+    ) {
+      return edited.message
+    }
+
+    if (
+      typeof edited ===
+        'object'
+    ) {
+      return edited
+    }
+  }
+
+  if (
+    Array.isArray(value)
+  ) {
+    for (
+      const item of
+      value
+    ) {
+      const result =
+        findEditedMessage(
+          item,
+          depth + 1,
+          seen
+        )
+
+      if (
+        result
+      ) {
+        return result
+      }
+    }
+
+    return null
+  }
+
+  for (
+    const key of
+    Object.keys(value)
+  ) {
+    const result =
+      findEditedMessage(
+        value[key],
+        depth + 1,
+        seen
+      )
+
+    if (
+      result
+    ) {
+      return result
+    }
+  }
+
+  return null
+}
+
+/*
+ * ==============================
+ * FIND EDIT KEY
+ * ==============================
+ */
+
+function findEditKey(
+  value,
+  depth = 0,
+  seen = new Set()
+) {
+  if (
+    value === null ||
+    value === undefined
+  ) {
+    return null
+  }
+
+  if (
+    depth > 12
+  ) {
+    return null
+  }
+
+  if (
+    typeof value !==
+      'object'
+  ) {
+    return null
+  }
+
+  if (
+    seen.has(value)
+  ) {
+    return null
+  }
+
+  seen.add(value)
+
+  if (
+    value.key &&
+    typeof value.key ===
+      'object'
+  ) {
+    const key =
+      value.key
+
+    if (
+      key.remoteJid ||
+      key.remoteJidAlt ||
+      key.id
+    ) {
+      return key
+    }
+  }
+
+  if (
+    Array.isArray(value)
+  ) {
+    for (
+      const item of
+      value
+    ) {
+      const result =
+        findEditKey(
+          item,
+          depth + 1,
+          seen
+        )
+
+      if (
+        result
+      ) {
+        return result
+      }
+    }
+
+    return null
+  }
+
+  for (
+    const key of
+    Object.keys(value)
+  ) {
+    const result =
+      findEditKey(
+        value[key],
+        depth + 1,
+        seen
+      )
+
+    if (
+      result
+    ) {
+      return result
+    }
+  }
+
+  return null
 }
 
 async function startSupport(
@@ -616,26 +817,6 @@ async function connect() {
      * ==============================
      * EDITED MESSAGES
      * ==============================
-     *
-     * Baileys 7 rc14 emits edits as:
-     *
-     * {
-     *   key: {
-     *     ...
-     *   },
-     *
-     *   update: {
-     *     message: {
-     *       editedMessage: {
-     *         message: {
-     *           conversation: '...'
-     *         }
-     *       }
-     *     }
-     *   }
-     * }
-     *
-     * ==============================
      */
 
     sock.ev.on(
@@ -643,16 +824,6 @@ async function connect() {
       async updates => {
         console.log(
           '[EDIT] messages.update received'
-        )
-
-        console.log(
-          `[EDIT] Number of updates: ${
-            Array.isArray(
-              updates
-            )
-              ? updates.length
-              : 0
-          }`
         )
 
         if (
@@ -673,49 +844,99 @@ async function connect() {
         ) {
           try {
             console.log(
-              '[EDIT] Update received for:',
+              '[EDIT] Update:',
               item?.key
                 ?.remoteJid ||
                 'unknown'
             )
 
-            const editedContent =
+            /*
+             * First try the exact
+             * Baileys structure.
+             */
+
+            let editedContent =
               item
                 ?.update
                 ?.message
                 ?.editedMessage
                 ?.message
 
+            /*
+             * If the exact structure
+             * is not found, search the
+             * complete update object.
+             */
+
+            if (
+              !editedContent
+            ) {
+              editedContent =
+                findEditedMessage(
+                  item
+                )
+            }
+
+            /*
+             * Nothing means this is
+             * another messages.update
+             * such as receipt/reaction.
+             */
+
             if (
               !editedContent
             ) {
               console.log(
-                '[EDIT] Update is not a message edit.'
+                '[EDIT] No editedMessage found in this update.'
               )
 
               continue
             }
 
             console.log(
-              '[EDIT] Edited content found.'
+              '[EDIT] Edited message FOUND.'
             )
 
-            const editedKey = {
-              ...(item?.key ||
-                {})
-            }
+            /*
+             * Baileys can provide the
+             * original message key
+             * through the update key.
+             */
+
+            let editedKey =
+              item?.key || {}
+
+            const nestedKey =
+              findEditKey(
+                item
+              )
 
             if (
-              !editedKey.id
+              nestedKey
             ) {
-              console.log(
-                '[EDIT] Warning: edited message has no key.id.'
-              )
+              editedKey = {
+                ...editedKey,
+                ...nestedKey
+              }
+            }
+
+            /*
+             * Keep remoteJid from
+             * alternate LID/PN fields.
+             */
+
+            if (
+              !editedKey.remoteJid &&
+              editedKey.remoteJidAlt
+            ) {
+              editedKey.remoteJid =
+                editedKey.remoteJidAlt
             }
 
             const editedMessage = {
-              key:
-                editedKey,
+              key: {
+                ...editedKey
+              },
 
               message:
                 editedContent,
@@ -726,12 +947,26 @@ async function connect() {
                   ?.messageTimestamp,
 
               pushName:
-                item
-                  ?.pushName
+                item?.pushName
             }
 
             console.log(
-              '[EDIT] Sending edited message to handler.'
+              '[EDIT] Remote JID:',
+              editedMessage
+                ?.key
+                ?.remoteJid ||
+                'unknown'
+            )
+
+            console.log(
+              '[EDIT] FromMe:',
+              !!editedMessage
+                ?.key
+                ?.fromMe
+            )
+
+            console.log(
+              '[EDIT] Passing edited message to handler.'
             )
 
             await handleMessages(
@@ -752,7 +987,7 @@ async function connect() {
             )
 
             console.log(
-              '[EDIT] Handler finished.'
+              '[EDIT] Edited message handled.'
             )
 
           } catch (
