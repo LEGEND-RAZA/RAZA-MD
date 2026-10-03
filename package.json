@@ -13,6 +13,7 @@
   "dependencies": {
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "7.0.0-rc14",
+    "edge-tts-universal": "^1.4.0",
     "ffmpeg-static": "^5.2.0",
     "pino": "^9.7.0"
   }
