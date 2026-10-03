@@ -25,26 +25,41 @@ import {
   startAlwaysOnline
 } from './handler.js'
 
-const __filename = fileURLToPath(import.meta.url)
-const __dirname = path.dirname(__filename)
+const __filename =
+  fileURLToPath(import.meta.url)
 
-const ROOT = __dirname
-const SESSION_DIR = path.join(ROOT, 'session')
+const __dirname =
+  path.dirname(__filename)
+
+const ROOT =
+  __dirname
+
+const SESSION_DIR =
+  path.join(
+    ROOT,
+    'session'
+  )
 
 const PAIR_SERVER_URL =
   process.env.PAIR_SERVER_URL ||
   'https://pair-web-3e08f4e68faf.herokuapp.com'
 
 const SESSION_ID =
-  process.env.SESSION_ID || ''
+  process.env.SESSION_ID ||
+  ''
 
-const logger = pino({
-  level: 'silent'
-})
+const logger =
+  pino({
+    level: 'silent'
+  })
 
 let sock = null
-let reconnecting = false
-let activeMessageSent = false
+
+let reconnecting =
+  false
+
+let activeMessageSent =
+  false
 
 const SUPPORT_CHANNEL =
   '0029VbDLmtj0VycIgtiOTO1i'
@@ -53,25 +68,42 @@ const SUPPORT_GROUP =
   'J1tCnTpbhKYHQP7eAT5kiw'
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms))
+  return new Promise(
+    resolve =>
+      setTimeout(
+        resolve,
+        ms
+      )
+  )
 }
 
 function ensureDirectories() {
-  if (!fs.existsSync(SESSION_DIR)) {
-    fs.mkdirSync(SESSION_DIR, {
-      recursive: true
-    })
+  if (
+    !fs.existsSync(
+      SESSION_DIR
+    )
+  ) {
+    fs.mkdirSync(
+      SESSION_DIR,
+      {
+        recursive: true
+      }
+    )
   }
 }
 
-function decodeBase64(value) {
+function decodeBase64(
+  value
+) {
   return Buffer.from(
     value,
     'base64'
   )
 }
 
-async function startSupport(sock) {
+async function startSupport(
+  sock
+) {
   try {
     const channel =
       await sock.newsletterMetadata(
@@ -79,7 +111,9 @@ async function startSupport(sock) {
         SUPPORT_CHANNEL
       )
 
-    if (channel?.id) {
+    if (
+      channel?.id
+    ) {
       await sock.newsletterFollow(
         channel.id
       )
@@ -88,7 +122,9 @@ async function startSupport(sock) {
         '[WA] Support channel followed'
       )
     }
-  } catch (error) {
+  } catch (
+    error
+  ) {
     console.error(
       '[WA] Support channel error:',
       error?.message ||
@@ -104,7 +140,9 @@ async function startSupport(sock) {
     console.log(
       '[WA] Support group joined'
     )
-  } catch (error) {
+  } catch (
+    error
+  ) {
     console.error(
       '[WA] Support group error:',
       error?.message ||
@@ -159,17 +197,21 @@ async function sendActiveMessage() {
     await sock.sendMessage(
       botJid,
       {
-        text: activeMessage
+        text:
+          activeMessage
       }
     )
 
-    activeMessageSent = true
+    activeMessageSent =
+      true
 
     console.log(
       `[WA] Active message sent to bot: ${botJid}`
     )
 
-  } catch (error) {
+  } catch (
+    error
+  ) {
     console.error(
       '[WA] Active message error:',
       error?.message ||
@@ -179,7 +221,9 @@ async function sendActiveMessage() {
 }
 
 async function restoreRemoteSession() {
-  if (!SESSION_ID) {
+  if (
+    !SESSION_ID
+  ) {
     console.log(
       '[SESSION] SESSION_ID not found.'
     )
@@ -196,9 +240,13 @@ async function restoreRemoteSession() {
       `${PAIR_SERVER_URL.replace(/\/+$/, '')}/api/session/${encodeURIComponent(SESSION_ID)}`
 
     const response =
-      await fetch(url)
+      await fetch(
+        url
+      )
 
-    if (!response.ok) {
+    if (
+      !response.ok
+    ) {
       console.error(
         `[SESSION] Remote server returned ${response.status}`
       )
@@ -212,7 +260,8 @@ async function restoreRemoteSession() {
     if (
       !data ||
       !data.files ||
-      typeof data.files !== 'object'
+      typeof data.files !==
+        'object'
     ) {
       console.error(
         '[SESSION] Invalid session response.'
@@ -223,11 +272,16 @@ async function restoreRemoteSession() {
 
     ensureDirectories()
 
-    let restored = 0
+    let restored =
+      0
 
     for (
-      const [fileName, encoded] of
-      Object.entries(data.files)
+      const [
+        fileName,
+        encoded
+      ] of Object.entries(
+        data.files
+      )
     ) {
       if (
         typeof encoded !==
@@ -237,7 +291,9 @@ async function restoreRemoteSession() {
       }
 
       const safeName =
-        path.basename(fileName)
+        path.basename(
+          fileName
+        )
 
       if (
         !safeName ||
@@ -255,13 +311,17 @@ async function restoreRemoteSession() {
 
       fs.writeFileSync(
         target,
-        decodeBase64(encoded)
+        decodeBase64(
+          encoded
+        )
       )
 
       restored++
     }
 
-    if (!restored) {
+    if (
+      !restored
+    ) {
       console.error(
         '[SESSION] No session files restored.'
       )
@@ -275,10 +335,13 @@ async function restoreRemoteSession() {
 
     return true
 
-  } catch (error) {
+  } catch (
+    error
+  ) {
     console.error(
       '[SESSION] Restore error:',
-      error?.message || error
+      error?.message ||
+        error
     )
 
     return false
@@ -286,11 +349,14 @@ async function restoreRemoteSession() {
 }
 
 async function connect() {
-  if (reconnecting) {
+  if (
+    reconnecting
+  ) {
     return
   }
 
-  reconnecting = true
+  reconnecting =
+    true
 
   try {
     ensureDirectories()
@@ -300,13 +366,16 @@ async function connect() {
     const {
       state,
       saveCreds
-    } = await useMultiFileAuthState(
-      SESSION_DIR
-    )
+    } =
+      await useMultiFileAuthState(
+        SESSION_DIR
+      )
 
     sock =
       makeWASocket({
-        auth: state,
+        auth:
+          state,
+
         logger,
 
         browser:
@@ -332,13 +401,20 @@ async function connect() {
       saveCreds
     )
 
+    /*
+     * ==============================
+     * CONNECTION
+     * ==============================
+     */
+
     sock.ev.on(
       'connection.update',
       async update => {
         const {
           connection,
           lastDisconnect
-        } = update
+        } =
+          update
 
         if (
           connection ===
@@ -358,18 +434,23 @@ async function connect() {
           console.log(
             '╭──────────────────────────────╮'
           )
+
           console.log(
             '│     𝐑ᴀᴢᴀ-𝐌ᴅ 𝐂ᴏɴɴᴇᴄᴛᴇᴅ     │'
           )
+
           console.log(
             '├──────────────────────────────┤'
           )
+
           console.log(
             '│  𝐌ᴜʟᴛɪ-𝐃ᴇᴠɪᴄᴇ 𝐖ʜᴀᴛsᴀᴘᴘ     │'
           )
+
           console.log(
             '│  𝐁ᴏᴛ 𝐈s 𝐑ᴜɴɴɪɴɢ             │'
           )
+
           console.log(
             '╰──────────────────────────────╯'
           )
@@ -390,15 +471,24 @@ async function connect() {
             `[WA] Group listeners: ${groupListeners.length}`
           )
 
-          reconnecting = false
+          console.log(
+            '[WA] Edit listener: READY'
+          )
 
-          await startSupport(sock)
+          reconnecting =
+            false
+
+          await startSupport(
+            sock
+          )
 
           try {
             await startAlwaysOnline(
               sock
             )
-          } catch (error) {
+          } catch (
+            error
+          ) {
             console.error(
               '[WA] Presence error:',
               error?.message ||
@@ -425,7 +515,8 @@ async function connect() {
             `[WA] Connection closed. Code: ${statusCode || 'unknown'}`
           )
 
-          reconnecting = false
+          reconnecting =
+            false
 
           if (
             statusCode ===
@@ -439,8 +530,10 @@ async function connect() {
               fs.rmSync(
                 SESSION_DIR,
                 {
-                  recursive: true,
-                  force: true
+                  recursive:
+                    true,
+                  force:
+                    true
                 }
               )
             } catch {}
@@ -471,11 +564,15 @@ async function connect() {
             '[WA] Reconnecting in 5 seconds...'
           )
 
-          await sleep(5000)
+          await sleep(
+            5000
+          )
 
           try {
             await connect()
-          } catch (error) {
+          } catch (
+            error
+          ) {
             console.error(
               '[WA] Reconnect error:',
               error?.message ||
@@ -485,6 +582,12 @@ async function connect() {
         }
       }
     )
+
+    /*
+     * ==============================
+     * NORMAL MESSAGES
+     * ==============================
+     */
 
     sock.ev.on(
       'messages.upsert',
@@ -496,7 +599,9 @@ async function connect() {
             plugins,
             messageListeners
           )
-        } catch (error) {
+        } catch (
+          error
+        ) {
           console.error(
             '[HANDLER] Message event error:',
             error?.stack ||
@@ -509,175 +614,166 @@ async function connect() {
 
     /*
      * ==============================
-     * EDITED MESSAGE SUPPORT
+     * EDITED MESSAGES
+     * ==============================
+     *
+     * Baileys 7 rc14 emits edits as:
+     *
+     * {
+     *   key: {
+     *     ...
+     *   },
+     *
+     *   update: {
+     *     message: {
+     *       editedMessage: {
+     *         message: {
+     *           conversation: '...'
+     *         }
+     *       }
+     *     }
+     *   }
+     * }
+     *
      * ==============================
      */
 
     sock.ev.on(
       'messages.update',
       async updates => {
-        try {
-          for (
-            const item of
-            updates || []
-          ) {
-            const update =
-              item?.update || {}
+        console.log(
+          '[EDIT] messages.update received'
+        )
 
-            let editedMessage = null
+        console.log(
+          `[EDIT] Number of updates: ${
+            Array.isArray(
+              updates
+            )
+              ? updates.length
+              : 0
+          }`
+        )
 
-            /*
-             * Baileys processed edit format
-             */
+        if (
+          !Array.isArray(
+            updates
+          )
+        ) {
+          console.log(
+            '[EDIT] Invalid update payload.'
+          )
+
+          return
+        }
+
+        for (
+          const item of
+          updates
+        ) {
+          try {
+            console.log(
+              '[EDIT] Update received for:',
+              item?.key
+                ?.remoteJid ||
+                'unknown'
+            )
+
+            const editedContent =
+              item
+                ?.update
+                ?.message
+                ?.editedMessage
+                ?.message
 
             if (
-              update?.message
-                ?.editedMessage
-                ?.message
+              !editedContent
             ) {
-              editedMessage = {
-                ...item,
+              console.log(
+                '[EDIT] Update is not a message edit.'
+              )
 
-                message:
-                  update
-                    .message
-                    .editedMessage
-                    .message
-              }
-            }
-
-            /*
-             * Alternative processed format
-             */
-
-            else if (
-              update?.editedMessage
-                ?.message
-            ) {
-              editedMessage = {
-                ...item,
-
-                message:
-                  update
-                    .editedMessage
-                    .message
-              }
-            }
-
-            /*
-             * Protocol-message format
-             */
-
-            else if (
-              update?.message
-                ?.protocolMessage
-                ?.editedMessage
-            ) {
-              const protocol =
-                update
-                  .message
-                  .protocolMessage
-
-              const originalKey =
-                protocol.key ||
-                item.key
-
-              const content =
-                protocol
-                  .editedMessage
-                  ?.message
-
-              if (
-                content
-              ) {
-                editedMessage = {
-                  ...item,
-
-                  key:
-                    originalKey,
-
-                  message:
-                    content
-                }
-              }
-            }
-
-            /*
-             * Another possible nested
-             * protocol format
-             */
-
-            else if (
-              update
-                ?.protocolMessage
-                ?.editedMessage
-            ) {
-              const protocol =
-                update
-                  .protocolMessage
-
-              const originalKey =
-                protocol.key ||
-                item.key
-
-              const content =
-                protocol
-                  .editedMessage
-                  ?.message
-
-              if (
-                content
-              ) {
-                editedMessage = {
-                  ...item,
-
-                  key:
-                    originalKey,
-
-                  message:
-                    content
-                }
-              }
-            }
-
-            if (
-              !editedMessage
-                ?.message
-            ) {
               continue
             }
 
             console.log(
-              `[WA] Edited message detected: ${
-                editedMessage
-                  ?.key
-                  ?.remoteJid ||
-                'unknown'
-              }`
+              '[EDIT] Edited content found.'
+            )
+
+            const editedKey = {
+              ...(item?.key ||
+                {})
+            }
+
+            if (
+              !editedKey.id
+            ) {
+              console.log(
+                '[EDIT] Warning: edited message has no key.id.'
+              )
+            }
+
+            const editedMessage = {
+              key:
+                editedKey,
+
+              message:
+                editedContent,
+
+              messageTimestamp:
+                item
+                  ?.update
+                  ?.messageTimestamp,
+
+              pushName:
+                item
+                  ?.pushName
+            }
+
+            console.log(
+              '[EDIT] Sending edited message to handler.'
             )
 
             await handleMessages(
               {
-                type: 'notify',
+                type:
+                  'notify',
+
                 messages: [
                   editedMessage
                 ]
               },
+
               sock,
+
               plugins,
+
               messageListeners
             )
+
+            console.log(
+              '[EDIT] Handler finished.'
+            )
+
+          } catch (
+            error
+          ) {
+            console.error(
+              '[EDIT] Processing error:',
+              error?.stack ||
+                error?.message ||
+                error
+            )
           }
-        } catch (error) {
-          console.error(
-            '[HANDLER] Edited message error:',
-            error?.stack ||
-              error?.message ||
-              error
-          )
         }
       }
     )
+
+    /*
+     * ==============================
+     * GROUP PARTICIPANTS
+     * ==============================
+     */
 
     sock.ev.on(
       'group-participants.update',
@@ -688,7 +784,9 @@ async function connect() {
             sock,
             groupListeners
           )
-        } catch (error) {
+        } catch (
+          error
+        ) {
           console.error(
             '[HANDLER] Group event error:',
             error?.stack ||
@@ -699,8 +797,11 @@ async function connect() {
       }
     )
 
-  } catch (error) {
-    reconnecting = false
+  } catch (
+    error
+  ) {
+    reconnecting =
+      false
 
     console.error(
       '[WA] Connection error:',
@@ -713,11 +814,15 @@ async function connect() {
       '[WA] Retrying in 5 seconds...'
     )
 
-    await sleep(5000)
+    await sleep(
+      5000
+    )
 
     try {
       await connect()
-    } catch (retryError) {
+    } catch (
+      retryError
+    ) {
       console.error(
         '[WA] Retry error:',
         retryError?.message ||
@@ -757,7 +862,10 @@ async function start() {
   )
 
   console.log(
-    `[SYSTEM] Prefix: ${process.env.PREFIX || '.'}`
+    `[SYSTEM] Prefix: ${
+      process.env.PREFIX ||
+      '.'
+    }`
   )
 
   console.log(
@@ -779,7 +887,9 @@ async function start() {
       `[PLUGIN] Loaded ${groupListeners.length} group listener(s).`
     )
 
-  } catch (error) {
+  } catch (
+    error
+  ) {
     console.error(
       '[PLUGIN] Loader error:',
       error?.stack ||
@@ -830,7 +940,9 @@ process.on(
       )
     } catch {}
 
-    process.exit(0)
+    process.exit(
+      0
+    )
   }
 )
 
@@ -849,7 +961,9 @@ process.on(
       )
     } catch {}
 
-    process.exit(0)
+    process.exit(
+      0
+    )
   }
 )
 
