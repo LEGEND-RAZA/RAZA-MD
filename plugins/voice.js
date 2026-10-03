@@ -25,15 +25,13 @@ async function romanToUrdu(text) {
       '&oe=utf-8' +
       '&app=chat'
 
-    const response =
-      await fetch(url)
+    const response = await fetch(url)
 
     if (!response.ok) {
       return text
     }
 
-    const data =
-      await response.json()
+    const data = await response.json()
 
     if (
       data?.[0] !== 'SUCCESS' ||
@@ -140,7 +138,7 @@ export default {
         {
           text:
             '❌ ᴘʟᴇᴀsᴇ ᴘʀᴏᴠɪᴅᴇ sᴏᴍᴇ ᴛᴇxᴛ.\n\n' +
-            'ᴇxᴀᴍᴘʟᴇ:\n' +
+            'ᴜsᴀɢᴇ:\n' +
             '.ᴠᴏɪᴄᴇ ᴍᴜᴊʜᴇ ᴀᴀᴘ sᴇ ᴇᴋ ʙᴀᴀᴛ ᴋᴀʀɴɪ ʜᴀɪ'
         },
         { quoted: message }
@@ -185,44 +183,32 @@ export default {
         { quoted: message }
       )
 
-      /*
-       * Roman Urdu → Urdu
-       *
-       * Example:
-       * "mujhe aap se ek baat karni hai"
-       *
-       * becomes:
-       * "مجھے آپ سے ایک بات کرنی ہے"
-       */
       const urduText =
         await romanToUrdu(text)
 
-      console.log(
-        '[VOICE] Input:',
-        text
-      )
-
-      console.log(
-        '[VOICE] Urdu:',
-        urduText
-      )
-
+      /*
+       * Always use Aegis.
+       * Aegis = Urdu Female
+       * Fasih = Urdu Male
+       */
       const response =
         await fetch(
           'https://api.tts.ai/v1/tts/',
           {
             method: 'POST',
+
             headers: {
               'Content-Type':
                 'application/json'
             },
+
             body: JSON.stringify({
               model: 'piper',
               voice: 'Aegis',
               text: urduText,
+              language: 'ur',
               format: 'mp3',
-              speed: 1.0,
-              language: 'ur'
+              speed: 1.0
             })
           }
         )
@@ -248,10 +234,10 @@ export default {
           'application/json'
         )
       ) {
-        const data =
+        const job =
           await response.json()
 
-        if (!data?.uuid) {
+        if (!job?.uuid) {
           throw new Error(
             'TTS job ID was not returned'
           )
@@ -270,7 +256,7 @@ export default {
 
           const statusResponse =
             await fetch(
-              `https://api.tts.ai/v1/speech/results/?uuid=${encodeURIComponent(data.uuid)}`
+              `https://api.tts.ai/v1/speech/results/?uuid=${encodeURIComponent(job.uuid)}`
             )
 
           if (!statusResponse.ok) {
@@ -312,7 +298,7 @@ export default {
 
         if (!audioResponse.ok) {
           throw new Error(
-            'Failed to download generated audio'
+            'Failed to download TTS audio'
           )
         }
 
@@ -375,7 +361,7 @@ export default {
         jid,
         {
           text:
-            '❌ ᴜʀᴅᴜ ᴠᴏɪᴄᴇ ғᴀɪʟᴇᴅ\n\n' +
+            '❌ ᴜʀᴅᴜ ғᴇᴍᴀʟᴇ ᴠᴏɪᴄᴇ ғᴀɪʟᴇᴅ\n\n' +
             `${error?.message || error}`
         },
         { quoted: message }
