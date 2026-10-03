@@ -10,7 +10,6 @@ import pino from 'pino'
 
 import fs from 'fs'
 import path from 'path'
-import readline from 'readline'
 import { fileURLToPath } from 'url'
 
 import {
@@ -308,7 +307,6 @@ async function connect() {
     sock =
       makeWASocket({
         auth: state,
-
         logger,
 
         browser:
@@ -355,9 +353,7 @@ async function connect() {
           connection ===
           'open'
         ) {
-          console.log(
-            ''
-          )
+          console.log('')
 
           console.log(
             '╭──────────────────────────────╮'
@@ -511,6 +507,74 @@ async function connect() {
       }
     )
 
+    /*
+     * ==============================
+     * EDITED MESSAGE SUPPORT
+     * ==============================
+     */
+
+    sock.ev.on(
+      'messages.update',
+      async updates => {
+        try {
+          for (
+            const item of
+            updates || []
+          ) {
+            const protocolMessage =
+              item?.update
+                ?.message
+                ?.protocolMessage
+
+            if (
+              !protocolMessage?.editedMessage ||
+              !protocolMessage?.key
+            ) {
+              continue
+            }
+
+            const editedMessage = {
+              key:
+                protocolMessage.key,
+
+              message:
+                protocolMessage.editedMessage,
+
+              pushName:
+                item?.update?.pushName ||
+                item?.pushName ||
+                undefined,
+
+              messageTimestamp:
+                item?.update
+                  ?.messageTimestamp ||
+                item?.messageTimestamp ||
+                undefined
+            }
+
+            await handleMessages(
+              {
+                type: 'notify',
+                messages: [
+                  editedMessage
+                ]
+              },
+              sock,
+              plugins,
+              messageListeners
+            )
+          }
+        } catch (error) {
+          console.error(
+            '[HANDLER] Edited message error:',
+            error?.stack ||
+              error?.message ||
+              error
+          )
+        }
+      }
+    )
+
     sock.ev.on(
       'group-participants.update',
       async event => {
@@ -560,9 +624,7 @@ async function connect() {
 }
 
 async function start() {
-  console.log(
-    ''
-  )
+  console.log('')
 
   console.log(
     '╭──────────────────────────────╮'
@@ -580,9 +642,7 @@ async function start() {
     '╰──────────────────────────────╯'
   )
 
-  console.log(
-    ''
-  )
+  console.log('')
 
   console.log(
     '[SYSTEM] Starting Raza-MD...'
