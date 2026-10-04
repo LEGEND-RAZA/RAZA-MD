@@ -1,3 +1,5 @@
+import { jidNormalizedUser } from '@whiskeysockets/baileys'
+
 export default {
   command: ['dll'],
   category: 'group',
@@ -13,9 +15,14 @@ export default {
   }) {
     if (!isOwner) return
 
+    const jid =
+      message?.key?.remoteJid
+
+    if (!jid) return
+
     if (!isGroup) {
       return await sock.sendMessage(
-        message.key.remoteJid,
+        jid,
         {
           text:
             '❌ 𝐓ʜɪs 𝐂ᴏᴍᴍᴀɴᴅ 𝐎ɴʟʏ 𝐖ᴏʀᴋs 𝐈ɴ 𝐆ʀᴏᴜᴘs'
@@ -26,25 +33,47 @@ export default {
       )
     }
 
-    const jid =
-      message.key.remoteJid
-
     try {
       const group =
         await sock.groupMetadata(jid)
 
       const botJid =
         sock.user?.id
-          ? sock.user.id.split(':')[0] +
-            '@s.whatsapp.net'
+          ? jidNormalizedUser(sock.user.id)
           : ''
+
+      const botParticipant =
+        group.participants.find(
+          participant =>
+            jidNormalizedUser(
+              participant.id
+            ) === botJid
+        )
+
+      if (
+        !botParticipant ||
+        !botParticipant.admin
+      ) {
+        return await sock.sendMessage(
+          jid,
+          {
+            text:
+              '❌ 𝐁ᴏᴛ 𝐌ᴜsᴛ 𝐁ᴇ 𝐀ᴅᴍɪɴ 𝐓ᴏ 𝐃ᴇᴍᴏᴛᴇ 𝐀ᴅᴍɪɴs'
+          },
+          {
+            quoted: message
+          }
+        )
+      }
 
       const admins =
         group.participants
           .filter(
             participant =>
               participant.admin &&
-              participant.id !== botJid
+              jidNormalizedUser(
+                participant.id
+              ) !== botJid
           )
           .map(
             participant =>
@@ -82,6 +111,11 @@ export default {
       )
 
     } catch (error) {
+      console.error(
+        '[DLL] Error:',
+        error?.message || error
+      )
+
       return await sock.sendMessage(
         jid,
         {
