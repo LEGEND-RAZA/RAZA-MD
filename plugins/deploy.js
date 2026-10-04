@@ -1,5 +1,5 @@
 export default {
-  command: ['deploy', 'update', 'redeploy'],
+  command: ['deploy'],
   category: 'owner',
   description: 'Create or deploy Raza-MD on Heroku',
 
@@ -152,16 +152,46 @@ export default {
        * CONFIG VARS
        */
 
+      const configVars = {
+        SESSION_ID: sessionId,
+
+        PAIR_SERVER_URL,
+
+        PREFIX:
+          process.env.PREFIX || '.',
+
+        HEROKU_API_KEY:
+          process.env.HEROKU_API_KEY || '',
+
+        HEROKU_APP_NAME:
+          actualAppName,
+
+        DB_HOST:
+          process.env.DB_HOST ||
+          'mysql-raza123-innoxcentraza-9801.c.aivencloud.com',
+
+        DB_PORT:
+          process.env.DB_PORT ||
+          '19244',
+
+        DB_NAME:
+          process.env.DB_NAME ||
+          'defaultdb',
+
+        DB_USER:
+          process.env.DB_USER ||
+          'avnadmin',
+
+        DB_PASSWORD:
+          process.env.DB_PASSWORD || 'AVNS_bNdClU_igW6ULgky-vH'
+      }
+
       const configResponse = await fetch(
         `${apiBase}/config-vars`,
         {
           method: 'PATCH',
           headers,
-          body: JSON.stringify({
-            SESSION_ID: sessionId,
-            PAIR_SERVER_URL,
-            PREFIX: '.'
-          })
+          body: JSON.stringify(configVars)
         }
       )
 
@@ -211,9 +241,6 @@ export default {
 
       /*
        * WORKER FORMATION
-       *
-       * Heroku requires an object with
-       * process types as keys.
        */
 
       const formationResponse = await fetch(
@@ -222,14 +249,22 @@ export default {
           method: 'PATCH',
           headers,
           body: JSON.stringify({
-            worker: {
-              quantity: 1,
-              size: 'basic'
-            },
-            web: {
-              quantity: 0,
-              size: 'basic'
-            }
+            updates: [
+              {
+                type: 'web',
+                quantity: 0,
+                dyno_size: {
+                  name: 'basic'
+                }
+              },
+              {
+                type: 'worker',
+                quantity: 1,
+                dyno_size: {
+                  name: 'basic'
+                }
+              }
+            ]
           })
         }
       )
@@ -258,6 +293,7 @@ export default {
             `📦 ʙᴜɪʟᴅ: ${buildId}\n` +
             `🌿 ʙʀᴀɴᴄʜ: ${BRANCH}\n` +
             '🔐 sᴇssɪᴏɴ_ɪᴅ: ᴜᴘᴅᴀᴛᴇᴅ\n' +
+            '🗄️ ᴅᴀᴛᴀʙᴀsᴇ: ᴄᴏɴғɪɢᴜʀᴇᴅ\n' +
             '⚙️ ᴘʀᴏᴄᴇss: ᴡᴏʀᴋᴇʀ\n' +
             '▶️ ᴄᴏᴍᴍᴀɴᴅ: ɴᴏᴅᴇ ɪɴᴅᴇx.ᴊs\n' +
             '🌐 ᴡᴇʙ: ᴅɪsᴀʙʟᴇᴅ\n' +
