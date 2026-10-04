@@ -2,7 +2,6 @@ import fs from 'fs/promises'
 import path from 'path'
 import os from 'os'
 import { randomUUID } from 'crypto'
-import ytdlp from 'yt-dlp-exec'
 
 export const play = {
   command: ['play', 'song'],
@@ -35,11 +34,6 @@ export const play = {
       return
     }
 
-    const cookieData =
-      process.env.YOUTUBE_COOKIE ||
-      process.env.YT_COOKIE ||
-      ''
-
     const id =
       randomUUID()
 
@@ -62,6 +56,14 @@ export const play = {
       )
 
     try {
+      const { default: ytdlp } =
+        await import('yt-dlp-exec')
+
+      const cookieData =
+        process.env.YOUTUBE_COOKIE ||
+        process.env.YT_COOKIE ||
+        ''
+
       await fs.mkdir(
         workDir,
         {
@@ -185,8 +187,7 @@ export const play = {
       const audioFile =
         files.find(
           file =>
-            file !==
-              'cookies.txt' &&
+            file !== 'cookies.txt' &&
             /\.(mp3|m4a|opus|webm|ogg)$/i.test(
               file
             )
@@ -246,8 +247,9 @@ export const play = {
     } catch (error) {
       console.error(
         '[PLAY ERROR]:',
+        error?.stderr ||
         error?.message ||
-          error
+        error
       )
 
       let text =
@@ -257,10 +259,18 @@ export const play = {
         String(
           error?.stderr ||
           error?.message ||
+          error ||
           ''
         )
 
       if (
+        /cannot find package|module not found/i.test(
+          errorText
+        )
+      ) {
+        text =
+          '❌ ʏᴛ-ᴅʟᴘ ᴅᴇᴘᴇɴᴅᴇɴᴄʏ ɪs ɴᴏᴛ ɪɴsᴛᴀʟʟᴇᴅ.'
+      } else if (
         /cookie|login|sign in|authentication/i.test(
           errorText
         )
@@ -301,13 +311,9 @@ export const play = {
   }
 }
 
-function formatDuration(
-  seconds
-) {
+function formatDuration(seconds) {
   if (
-    !Number.isFinite(
-      seconds
-    ) ||
+    !Number.isFinite(seconds) ||
     seconds < 0
   ) {
     return ''
@@ -317,9 +323,7 @@ function formatDuration(
     Math.floor(seconds)
 
   const hours =
-    Math.floor(
-      total / 3600
-    )
+    Math.floor(total / 3600)
 
   const minutes =
     Math.floor(
@@ -342,9 +346,7 @@ function formatDuration(
   ).padStart(2, '0')}`
 }
 
-function safeFileName(
-  name
-) {
+function safeFileName(name) {
   return String(
     name || 'audio'
   )
