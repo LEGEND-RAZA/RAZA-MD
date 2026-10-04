@@ -33,7 +33,8 @@ const delay = ms =>
 export default {
   command: 'alinks',
   category: 'tools',
-  description: 'Automatically collect and forward WhatsApp group links',
+  description:
+    'Automatically collect and forward WhatsApp group links',
 
   async run({
     sock,
@@ -319,6 +320,12 @@ export const __alinks_listener = {
         if (!code) continue
 
         try {
+          /*
+           * ==============================
+           * GET GROUP INFORMATION
+           * ==============================
+           */
+
           const meta =
             await sock.groupGetInviteInfo(
               code
@@ -331,6 +338,12 @@ export const __alinks_listener = {
           const groupId =
             meta?.id
 
+          /*
+           * ==============================
+           * GET GROUP PROFILE PICTURE
+           * ==============================
+           */
+
           let thumbBuffer = null
 
           if (groupId) {
@@ -338,7 +351,7 @@ export const __alinks_listener = {
               const ppUrl =
                 await sock.profilePictureUrl(
                   groupId,
-                  'image'
+                  'preview'
                 )
 
               if (ppUrl) {
@@ -357,42 +370,65 @@ export const __alinks_listener = {
             } catch {}
           }
 
+          /*
+           * ==============================
+           * SEND TO ALL TARGETS
+           * ==============================
+           */
+
           for (
             const targetJid
             of settings.targetJids
           ) {
-            const textMessage =
+            const messageText =
 `${settings.customMsg || ''}
 ${link}`
 
             const content = {
               text:
-                textMessage
-            }
+                messageText,
 
-            if (thumbBuffer) {
-              content.contextInfo = {
-                externalAdReply: {
-                  title:
-                    groupName,
+              linkPreview: {
+                'matched-text':
+                  link,
 
-                  body:
-                    `Invite to join "${groupName}"`,
+                title:
+                  groupName,
 
-                  mediaType: 1,
+                description:
+                  `Invite to join "${groupName}"`,
 
-                  previewType:
-                    'PHOTO',
+                previewType: 0,
 
-                  renderLargerThumbnail:
-                    true,
+                ...(thumbBuffer
+                  ? {
+                      jpegThumbnail:
+                        thumbBuffer
+                    }
+                  : {})
+              },
 
-                  thumbnail:
-                    thumbBuffer,
+              externalAdReply: {
+                title:
+                  groupName,
 
-                  sourceUrl:
-                    link
-                }
+                body:
+                  `Invite to join "${groupName}"`,
+
+                mediaType: 1,
+
+                renderLargerThumbnail:
+                  true,
+
+                ...(thumbBuffer
+                  ? {
+                      thumbnail:
+                        thumbBuffer
+                    }
+                  : {}),
+
+                sourceUrl:
+                  link
               }
             }
 
@@ -411,6 +447,12 @@ ${link}`
           }
 
         } catch (error) {
+
+          /*
+           * ==============================
+           * FALLBACK
+           * ==============================
+           */
 
           for (
             const targetJid
