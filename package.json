@@ -17,6 +17,7 @@
     "edge-tts-universal": "^1.4.0",
     "ffmpeg-static": "^5.2.0",
     "mysql2": "^3.14.3",
-    "pino": "^9.7.0"
+    "pino": "^9.7.0",
+    "yt-dlp-exec": "^1.0.2"
   }
 }
