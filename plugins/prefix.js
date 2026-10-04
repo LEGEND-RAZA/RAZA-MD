@@ -1,5 +1,25 @@
+import fs from 'node:fs'
+import path from 'node:path'
+
+function toSmallCaps(text) {
+  const map = {
+    a: '\u1D00', b: '\u0299', c: '\u1D04', d: '\u1D05', e: '\u1D07',
+    f: '\u0493', g: '\u0262', h: '\u029C', i: '\u026A', j: '\u1D0A',
+    k: '\u1D0B', l: '\u029F', m: '\u1D0D', n: '\u0274', o: '\u1D0F',
+    p: '\u1D18', q: '\u01FA', r: '\u0280', s: 's', t: '\u1D1B',
+    u: '\u1D1C', v: '\u1D20', w: '\u1D21', x: 'x', y: '\u028F',
+    z: '\u1D22'
+  }
+
+  return String(text || '')
+    .toLowerCase()
+    .split('')
+    .map(c => map[c] || c)
+    .join('')
+}
+
 export default {
-  command: 'setprefix',
+  command: 'prefix',
   category: 'owner',
   description: 'Change or check the bot command prefix',
 
@@ -19,7 +39,9 @@ export default {
         jid,
         {
           text:
-            '❌ ᴏɴʟʏ ᴛʜᴇ ʙᴏᴛ ᴏᴡɴᴇʀ ᴄᴀɴ ᴄʜᴀɴɢᴇ ᴛʜᴇ ᴘʀᴇғɪx.'
+            `❌ ${toSmallCaps(
+              'only the bot owner can change the prefix.'
+            )}`
         },
         {
           quoted: message
@@ -38,8 +60,12 @@ export default {
         jid,
         {
           text:
-            `⚙️ *ᴄᴜʀʀᴇɴᴛ ᴘʀᴇғɪx:* [ ${currentPrefix} ]\n\n` +
-            `*ᴜsᴀɢᴇ:* ${currentPrefix}prefix <ɴᴇᴡ_ᴘʀᴇғɪx>`
+            `⚙️ *${toSmallCaps(
+              'current prefix'
+            )}:* [ ${currentPrefix} ]\n\n` +
+            `*${toSmallCaps(
+              'usage'
+            )}:* ${currentPrefix}prefix <new_prefix>`
         },
         {
           quoted: message
@@ -47,65 +73,55 @@ export default {
       )
     }
 
-    const API_KEY =
-      process.env.HEROKU_API_KEY
-
-    const APP_NAME =
-      process.env.HEROKU_APP_NAME
-
-    if (!API_KEY || !APP_NAME) {
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            '❌ ʜᴇʀᴏᴋᴜ ᴄᴏɴғɪɢᴜʀᴀᴛɪᴏɴ ɪs ᴍɪssɪɴɢ.\n\n' +
-            `HEROKU_API_KEY: ${
-              API_KEY ? '✓' : '✗'
-            }\n` +
-            `HEROKU_APP_NAME: ${
-              APP_NAME ? '✓' : '✗'
-            }`
-        },
-        {
-          quoted: message
-        }
+    const envPath =
+      path.join(
+        process.cwd(),
+        '.env'
       )
-    }
 
     try {
-      const response =
-        await fetch(
-          `https://api.heroku.com/apps/${encodeURIComponent(
-            APP_NAME
-          )}/config-vars`,
-          {
-            method: 'PATCH',
-            headers: {
-              Authorization:
-                `Bearer ${API_KEY}`,
-              Accept:
-                'application/vnd.heroku+json; version=3',
-              'Content-Type':
-                'application/json'
-            },
-            body: JSON.stringify({
-              PREFIX: newPrefix
-            })
-          }
-        )
+      let env =
+        fs.existsSync(envPath)
+          ? fs.readFileSync(
+              envPath,
+              'utf8'
+            )
+          : ''
 
-      const data =
-        await response.json().catch(
-          () => ({})
-        )
+      const regex =
+        /^PREFIX\s*=.*(?:\r?\n|$)/im
 
-      if (!response.ok) {
-        throw new Error(
-          data?.message ||
-          data?.error ||
-          `Heroku API error: HTTP ${response.status}`
-        )
+      const newLine =
+        `PREFIX="${newPrefix.replace(
+          /\\/g,
+          '\\\\'
+        ).replace(
+          /"/g,
+          '\\"'
+        )}"\n`
+
+      if (regex.test(env)) {
+        env =
+          env.replace(
+            regex,
+            newLine
+          )
+      } else {
+        if (
+          env.length > 0 &&
+          !env.endsWith('\n')
+        ) {
+          env += '\n'
+        }
+
+        env += newLine
       }
+
+      fs.writeFileSync(
+        envPath,
+        env,
+        'utf8'
+      )
 
       process.env.PREFIX =
         newPrefix
@@ -114,10 +130,12 @@ export default {
         jid,
         {
           text:
-            `✅ *ᴘʀᴇғɪx sᴜᴄᴄᴇssғᴜʟʟʏ ᴜᴘᴅᴀᴛᴇᴅ ᴛᴏ* [ ${newPrefix} ]\n\n` +
-            `☁️ ʜᴇʀᴏᴋᴜ ᴄᴏɴғɪɢ ᴠᴀʀ ᴜᴘᴅᴀᴛᴇᴅ\n` +
-            `⚙️ PREFIX=${newPrefix}\n` +
-            `🔄 ᴀᴘᴘ ᴡɪʟʟ ʀᴇsᴛᴀʀᴛ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ`
+            `✅ *${toSmallCaps(
+              'prefix successfully updated to'
+            )}* [ ${newPrefix} ]\n\n` +
+            `♻️ ${toSmallCaps(
+              'environment variable updated'
+            )}`
         },
         {
           quoted: message
@@ -134,7 +152,9 @@ export default {
         jid,
         {
           text:
-            '❌ ᴜɴᴀʙʟᴇ ᴛᴏ ᴜᴘᴅᴀᴛᴇ ᴘʀᴇғɪx\n\n' +
+            `❌ ${toSmallCaps(
+              'failed to update prefix'
+            )}\n\n` +
             `${error?.message || error}`
         },
         {
