@@ -1,5 +1,5 @@
 export default {
-  command: ['gjids],
+  command: ['gjids'],
   category: 'owner',
 
   description:
