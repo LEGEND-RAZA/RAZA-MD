@@ -25,44 +25,61 @@ function normalizeJid(input) {
 function getQuotedMessage(message) {
   const contextInfo =
     message.message?.extendedTextMessage?.contextInfo ||
+    message.message?.audioMessage?.contextInfo ||
     message.message?.imageMessage?.contextInfo ||
     message.message?.videoMessage?.contextInfo ||
-    message.message?.audioMessage?.contextInfo ||
     message.message?.documentMessage?.contextInfo
 
   return contextInfo?.quotedMessage || null
 }
 
-function getAudioMessage(message) {
+function unwrapMessage(message) {
   if (!message) return null
 
   if (message.audioMessage) {
-    return message.audioMessage
+    return message
   }
 
-  if (message.viewOnceMessage?.message?.audioMessage) {
-    return message.viewOnceMessage.message.audioMessage
+  if (message.viewOnceMessage?.message) {
+    return unwrapMessage(
+      message.viewOnceMessage.message
+    )
   }
 
-  if (message.viewOnceMessageV2?.message?.audioMessage) {
-    return message.viewOnceMessageV2.message.audioMessage
+  if (message.viewOnceMessageV2?.message) {
+    return unwrapMessage(
+      message.viewOnceMessageV2.message
+    )
   }
 
   if (
-    message.viewOnceMessageV2Extension?.message?.audioMessage
+    message.viewOnceMessageV2Extension?.message
   ) {
-    return message.viewOnceMessageV2Extension.message.audioMessage
+    return unwrapMessage(
+      message.viewOnceMessageV2Extension.message
+    )
+  }
+
+  if (message.ephemeralMessage?.message) {
+    return unwrapMessage(
+      message.ephemeralMessage.message
+    )
   }
 
   return null
 }
 
 export default {
-  command: ['vto'],
+  command: [
+    'vto',
+    'audioto',
+    'forwardaudio'
+  ],
+
   category: 'media',
 
   description:
-    'Forward an original voice note as view once',
+    'Forward a voice note',
 
   async run({
     sock,
@@ -72,15 +89,18 @@ export default {
   }) {
     if (!isOwner) return
 
-    const chatJid = message.key.remoteJid
-    const target = normalizeJid(args?.[0])
+    const chatJid =
+      message.key.remoteJid
+
+    const target =
+      normalizeJid(args?.[0])
 
     if (!target) {
       return await sock.sendMessage(
         chatJid,
         {
           text:
-            '❌ ᴘʟᴇᴀsᴇ ᴘʀᴏᴠɪᴅᴇ ᴀ ᴠᴀʟɪᴅ ɴᴜᴍʙᴇʀ ᴏʀ ɢʀᴏᴜᴘ ᴊɪᴅ.\n\nᴇxᴀᴍᴘʟᴇ:\n.vto 923xxxxxxxxx@s.whatsapp.net'
+            '❌ ᴘʟᴇᴀsᴇ ᴘʀᴏᴠɪᴅᴇ ᴀ ᴠᴀʟɪᴅ ɴᴜᴍʙᴇʀ ᴏʀ ɢʀᴏᴜᴘ ᴊɪᴅ.'
         },
         {
           quoted: message
@@ -88,7 +108,8 @@ export default {
       )
     }
 
-    const quoted = getQuotedMessage(message)
+    const quoted =
+      getQuotedMessage(message)
 
     if (!quoted) {
       return await sock.sendMessage(
@@ -103,9 +124,10 @@ export default {
       )
     }
 
-    const audio = getAudioMessage(quoted)
+    const audioMessage =
+      unwrapMessage(quoted)
 
-    if (!audio) {
+    if (!audioMessage) {
       return await sock.sendMessage(
         chatJid,
         {
@@ -118,81 +140,73 @@ export default {
       )
     }
 
+    const audio =
+      audioMessage.audioMessage
+
     try {
-      const stream = await downloadContentFromMessage(
-        audio,
-        'audio'
-      )
+      const stream =
+        await downloadContentFromMessage(
+          audio,
+          'audio'
+        )
 
       const chunks = []
 
-      for await (const chunk of stream) {
+      for await (
+        const chunk of stream
+      ) {
         chunks.push(chunk)
       }
 
-      const buffer = Buffer.concat(chunks)
+      const buffer =
+        Buffer.concat(chunks)
 
       if (!buffer.length) {
-        throw new Error('Audio buffer is empty')
+        throw new Error(
+          'Empty audio buffer'
+        )
       }
 
-      let waveform = audio.waveform
+      const originalSeconds =
+        Number(audio.seconds) || 1
 
-      if (waveform) {
-        if (Buffer.isBuffer(waveform)) {
-          waveform = Buffer.from(waveform)
-        } else if (waveform instanceof Uint8Array) {
-          waveform = Buffer.from(waveform)
-        }
-      }
-
-      /*
-       * Show recording status.
-       */
       await sock.sendPresenceUpdate(
         'recording',
         target
       )
 
-      /*
-       * Random recording time:
-       * 2 to 8 seconds.
-       */
-      const recordingTime =
-        Math.floor(Math.random() * 7) + 2
-
-      await new Promise(resolve =>
-        setTimeout(
-          resolve,
-          recordingTime * 1000
-        )
+      await new Promise(
+        resolve =>
+          setTimeout(
+            resolve,
+            originalSeconds * 1000
+          )
       )
 
-      /*
-       * Send the original audio.
-       *
-       * No TTS.
-       * No audio conversion.
-       * Original waveform and duration
-       * are preserved when available.
-       *
-       * viewOnce makes the voice note
-       * a View Once message.
-       */
       const voiceMessage = {
         audio: buffer,
         mimetype:
-          audio.mimetype || 'audio/ogg; codecs=opus',
-        ptt: true,
-        viewOnce: true
+          audio.mimetype ||
+          'audio/ogg; codecs=opus',
+        ptt: true
       }
 
-      if (audio.seconds != null) {
-        voiceMessage.seconds = audio.seconds
+      if (
+        audio.seconds !== undefined
+      ) {
+        voiceMessage.seconds =
+          audio.seconds
       }
 
-      if (waveform) {
-        voiceMessage.waveform = waveform
+      if (audio.waveform) {
+        voiceMessage.waveform =
+          Buffer.isBuffer(
+            audio.waveform
+          )
+            ? audio.waveform
+            : Buffer.from(
+                audio.waveform
+              )
       }
 
       await sock.sendMessage(
@@ -200,9 +214,6 @@ export default {
         voiceMessage
       )
 
-      /*
-       * Stop recording status.
-       */
       await sock.sendPresenceUpdate(
         'paused',
         target
@@ -212,14 +223,17 @@ export default {
         chatJid,
         {
           text:
-            `✅ ᴠɪᴇᴡ ᴏɴᴄᴇ ᴠᴏɪᴄᴇ ꜰᴏʀᴡᴀʀᴅᴇᴅ\n\nᴛᴏ: ${target}\nᴡᴀᴠᴇꜰᴏʀᴍ: ${waveform ? 'ᴘʀᴇsᴇʀᴠᴇᴅ' : 'ɴᴏᴛ ᴀᴠᴀɪʟᴀʙʟᴇ'}\nʀᴇᴄᴏʀᴅɪɴɢ: ${recordingTime}s`
+            `✅ ᴠᴏɪᴄᴇ sᴇɴᴛ\n\nᴛᴏ: ${target}\nᴅᴜʀᴀᴛɪᴏɴ: ${originalSeconds}s`
         },
         {
           quoted: message
         }
       )
     } catch (error) {
-      console.error('[VTO]', error)
+      console.error(
+        '[VTO]',
+        error
+      )
 
       await sock.sendPresenceUpdate(
         'paused',
@@ -230,7 +244,7 @@ export default {
         chatJid,
         {
           text:
-            '❌ ꜰᴀɪʟᴇᴅ ᴛᴏ ꜰᴏʀᴡᴀʀᴅ ᴛʜᴇ ᴠᴏɪᴄᴇ ɴᴏᴛᴇ.'
+            `❌ ꜰᴀɪʟᴇᴅ ᴛᴏ sᴇɴᴅ ᴠᴏɪᴄᴇ.\n\n${error?.message || 'Unknown error'}`
         },
         {
           quoted: message
