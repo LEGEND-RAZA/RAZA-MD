@@ -62,7 +62,7 @@ export default {
   category: 'media',
 
   description:
-    'Forward an original voice note to a number or group',
+    'Forward an original voice note as view once',
 
   async run({
     sock,
@@ -136,8 +136,18 @@ export default {
         throw new Error('Audio buffer is empty')
       }
 
+      let waveform = audio.waveform
+
+      if (waveform) {
+        if (Buffer.isBuffer(waveform)) {
+          waveform = Buffer.from(waveform)
+        } else if (waveform instanceof Uint8Array) {
+          waveform = Buffer.from(waveform)
+        }
+      }
+
       /*
-       * Show "recording..." to the target
+       * Show recording status.
        */
       await sock.sendPresenceUpdate(
         'recording',
@@ -145,26 +155,53 @@ export default {
       )
 
       /*
-       * Keep recording presence visible
-       * before sending the original audio
+       * Random recording time:
+       * 2 to 8 seconds.
        */
+      const recordingTime =
+        Math.floor(Math.random() * 7) + 2
+
       await new Promise(resolve =>
-        setTimeout(resolve, 1500)
+        setTimeout(
+          resolve,
+          recordingTime * 1000
+        )
       )
 
       /*
-       * Send the original audio as a voice note.
-       * No TTS and no speech conversion.
+       * Send the original audio.
+       *
+       * No TTS.
+       * No audio conversion.
+       * Original waveform and duration
+       * are preserved when available.
+       *
+       * viewOnce makes the voice note
+       * a View Once message.
        */
-      await sock.sendMessage(target, {
+      const voiceMessage = {
         audio: buffer,
         mimetype:
           audio.mimetype || 'audio/ogg; codecs=opus',
-        ptt: true
-      })
+        ptt: true,
+        viewOnce: true
+      }
+
+      if (audio.seconds != null) {
+        voiceMessage.seconds = audio.seconds
+      }
+
+      if (waveform) {
+        voiceMessage.waveform = waveform
+      }
+
+      await sock.sendMessage(
+        target,
+        voiceMessage
+      )
 
       /*
-       * Stop recording presence
+       * Stop recording status.
        */
       await sock.sendPresenceUpdate(
         'paused',
@@ -175,7 +212,7 @@ export default {
         chatJid,
         {
           text:
-            `✅ ᴠᴏɪᴄᴇ ɴᴏᴛᴇ ꜰᴏʀᴡᴀʀᴅᴇᴅ\n\nᴛᴏ: ${target}`
+            `✅ ᴠɪᴇᴡ ᴏɴᴄᴇ ᴠᴏɪᴄᴇ ꜰᴏʀᴡᴀʀᴅᴇᴅ\n\nᴛᴏ: ${target}\nᴡᴀᴠᴇꜰᴏʀᴍ: ${waveform ? 'ᴘʀᴇsᴇʀᴠᴇᴅ' : 'ɴᴏᴛ ᴀᴠᴀɪʟᴀʙʟᴇ'}\nʀᴇᴄᴏʀᴅɪɴɢ: ${recordingTime}s`
         },
         {
           quoted: message
