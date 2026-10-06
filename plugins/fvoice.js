@@ -15,7 +15,8 @@ function normalizeJid(input) {
     return input
   }
 
-  const number = input.replace(/\D/g, '')
+  const number =
+    input.replace(/\D/g, '')
 
   if (!number) return null
 
@@ -183,23 +184,23 @@ export default {
           )
       )
 
-      const audioPayload = {
+      const payload = {
         audio: buffer,
+
         mimetype:
           audio.mimetype ||
           'audio/ogg; codecs=opus',
-        ptt: true
-      }
 
-      if (
-        audio.seconds !== undefined
-      ) {
-        audioPayload.seconds =
-          audio.seconds
+        ptt: true,
+
+        seconds:
+          originalSeconds,
+
+        viewOnce: true
       }
 
       if (audio.waveform) {
-        audioPayload.waveform =
+        payload.waveform =
           Buffer.isBuffer(
             audio.waveform
           )
@@ -211,14 +212,7 @@ export default {
 
       await sock.sendMessage(
         target,
-        {
-          viewOnceMessage: {
-            message: {
-              audioMessage:
-                audioPayload
-            }
-          }
-        }
+        payload
       )
 
       await sock.sendPresenceUpdate(
@@ -236,6 +230,7 @@ export default {
           quoted: message
         }
       )
+
     } catch (error) {
       console.error(
         '[VTO]',
