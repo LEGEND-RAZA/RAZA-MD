@@ -183,24 +183,23 @@ export default {
           )
       )
 
-      const voiceMessage = {
+      const audioPayload = {
         audio: buffer,
         mimetype:
           audio.mimetype ||
           'audio/ogg; codecs=opus',
-        ptt: true,
-        viewOnce: true
+        ptt: true
       }
 
       if (
         audio.seconds !== undefined
       ) {
-        voiceMessage.seconds =
+        audioPayload.seconds =
           audio.seconds
       }
 
       if (audio.waveform) {
-        voiceMessage.waveform =
+        audioPayload.waveform =
           Buffer.isBuffer(
             audio.waveform
           )
@@ -212,7 +211,14 @@ export default {
 
       await sock.sendMessage(
         target,
-        voiceMessage
+        {
+          viewOnceMessage: {
+            message: {
+              audioMessage:
+                audioPayload
+            }
+          }
+        }
       )
 
       await sock.sendPresenceUpdate(
