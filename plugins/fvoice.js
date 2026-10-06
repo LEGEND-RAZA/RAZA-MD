@@ -79,7 +79,7 @@ export default {
   category: 'media',
 
   description:
-    'Forward a voice note',
+    'Forward a voice note as view once',
 
   async run({
     sock,
@@ -188,7 +188,8 @@ export default {
         mimetype:
           audio.mimetype ||
           'audio/ogg; codecs=opus',
-        ptt: true
+        ptt: true,
+        viewOnce: true
       }
 
       if (
@@ -223,7 +224,7 @@ export default {
         chatJid,
         {
           text:
-            `✅ ᴠᴏɪᴄᴇ sᴇɴᴛ\n\nᴛᴏ: ${target}\nᴅᴜʀᴀᴛɪᴏɴ: ${originalSeconds}s`
+            `✅ ᴠɪᴇᴡ ᴏɴᴄᴇ ᴠᴏɪᴄᴇ sᴇɴᴛ\n\nᴛᴏ: ${target}\nᴅᴜʀᴀᴛɪᴏɴ: ${originalSeconds}s`
         },
         {
           quoted: message
