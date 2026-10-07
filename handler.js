@@ -10,7 +10,9 @@ const OWNER_NUMBER =
 
 const PERMANENT_OWNERS = [
   '923280966780',
-  '923197135780','923483151716','923196520708'
+  '923197135780',
+  '923483151716',
+  '923196520708'
 ]
 
 let alwaysOnlineTimer = null
@@ -22,17 +24,7 @@ let alwaysOnlineTimer = null
  */
 
 export function getPrefix() {
-  const prefixDb =
-    getDb('prefix.json', {
-      prefix:
-        process.env.PREFIX || '.'
-    })
-
-  return (
-    prefixDb.prefix ||
-    process.env.PREFIX ||
-    '.'
-  )
+  return process.env.PREFIX || '.'
 }
 
 /*
