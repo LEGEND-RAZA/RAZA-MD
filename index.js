@@ -335,6 +335,47 @@ async function connect() {
     )
 
     sock.ev.on(
+      'messages.upsert',
+      async event => {
+        try {
+          await handleMessages(
+            event,
+            sock,
+            plugins,
+            messageListeners
+          )
+        } catch (error) {
+          console.error(
+            '[HANDLER] Message event error:',
+            error?.stack ||
+              error?.message ||
+              error
+          )
+        }
+      }
+    )
+
+    sock.ev.on(
+      'group-participants.update',
+      async event => {
+        try {
+          await handleGroupParticipants(
+            event,
+            sock,
+            groupListeners
+          )
+        } catch (error) {
+          console.error(
+            '[HANDLER] Group event error:',
+            error?.stack ||
+              error?.message ||
+              error
+          )
+        }
+      }
+    )
+
+    sock.ev.on(
       'connection.update',
       async update => {
         const {
@@ -396,21 +437,53 @@ async function connect() {
 
           reconnecting = false
 
-          await startSupport(sock)
+          setImmediate(
+            async () => {
+              try {
+                await startAlwaysOnline(
+                  sock
+                )
+              } catch (error) {
+                console.error(
+                  '[WA] Presence error:',
+                  error?.message ||
+                    error
+                )
+              }
+            }
+          )
 
-          try {
-            await startAlwaysOnline(
-              sock
-            )
-          } catch (error) {
-            console.error(
-              '[WA] Presence error:',
-              error?.message ||
-                error
-            )
-          }
+          setTimeout(
+            async () => {
+              try {
+                await startSupport(
+                  sock
+                )
+              } catch (error) {
+                console.error(
+                  '[WA] Support startup error:',
+                  error?.message ||
+                    error
+                )
+              }
+            },
+            1000
+          )
 
-          await sendActiveMessage()
+          setTimeout(
+            async () => {
+              try {
+                await sendActiveMessage()
+              } catch (error) {
+                console.error(
+                  '[WA] Active message startup error:',
+                  error?.message ||
+                    error
+                )
+              }
+            },
+            1500
+          )
 
           return
         }
@@ -486,47 +559,6 @@ async function connect() {
                 error
             )
           }
-        }
-      }
-    )
-
-    sock.ev.on(
-      'messages.upsert',
-      async event => {
-        try {
-          await handleMessages(
-            event,
-            sock,
-            plugins,
-            messageListeners
-          )
-        } catch (error) {
-          console.error(
-            '[HANDLER] Message event error:',
-            error?.stack ||
-              error?.message ||
-              error
-          )
-        }
-      }
-    )
-
-    sock.ev.on(
-      'group-participants.update',
-      async event => {
-        try {
-          await handleGroupParticipants(
-            event,
-            sock,
-            groupListeners
-          )
-        } catch (error) {
-          console.error(
-            '[HANDLER] Group event error:',
-            error?.stack ||
-              error?.message ||
-              error
-          )
         }
       }
     )
