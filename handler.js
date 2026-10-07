@@ -387,6 +387,64 @@ export async function stopAlwaysOnline(
 
 /*
  * ==============================
+ * MESSAGE LISTENER RUNNER
+ * ==============================
+ */
+
+function runMessageListeners(
+  messageListeners,
+  data
+) {
+  if (
+    !Array.isArray(
+      messageListeners
+    ) ||
+    !messageListeners.length
+  ) {
+    return
+  }
+
+  Promise.allSettled(
+    messageListeners.map(
+      async listener => {
+        try {
+          if (
+            typeof listener.on ===
+            'function'
+          ) {
+            await listener.on(
+              data
+            )
+          } else if (
+            typeof listener.run ===
+            'function'
+          ) {
+            await listener.run(
+              data
+            )
+          }
+        } catch (error) {
+          console.error(
+            '[Listener Error]:',
+            error?.stack ||
+              error?.message ||
+              error
+          )
+        }
+      }
+    )
+  ).catch(error => {
+    console.error(
+      '[Listener Runner Error]:',
+      error?.stack ||
+        error?.message ||
+        error
+    )
+  })
+}
+
+/*
+ * ==============================
  * MESSAGE HANDLER
  * ==============================
  */
@@ -407,9 +465,15 @@ export async function handleMessages(
     getAlwaysOnline() &&
     !alwaysOnlineTimer
   ) {
-    await startAlwaysOnline(
+    startAlwaysOnline(
       sock
-    )
+    ).catch(error => {
+      console.error(
+        '[Always Online Error]:',
+        error?.message ||
+          error
+      )
+    })
   }
 
   for (
@@ -431,11 +495,11 @@ export async function handleMessages(
         getAutoRead() &&
         message.key?.id
       ) {
-        try {
-          await sock.readMessages([
+        Promise.resolve(
+          sock.readMessages([
             message.key
           ])
-        } catch {}
+        ).catch(() => {})
       }
 
       const isGroupStatusPost =
@@ -476,53 +540,43 @@ export async function handleMessages(
       const activePrefix =
         getPrefix()
 
-      for (
-        const listener of
-        messageListeners
-      ) {
-        try {
-          if (
-            typeof listener.on ===
-            'function'
-          ) {
-            await listener.on({
-              sock,
-              message,
-              text,
-              isOwner,
-              isGroup:
-                isGroupChat,
-              isStatus:
-                isGroupStatusPost
-            })
-          } else if (
-            typeof listener.run ===
-            'function'
-          ) {
-            await listener.run({
-              sock,
-              message,
-              text,
-              isOwner,
-              isGroup:
-                isGroupChat,
-              isStatus:
-                isGroupStatusPost
-            })
-          }
-        } catch (err) {
-          console.error(
-            '[Listener Error]:',
-            err
-          )
+      /*
+       * ==============================
+       * RUN LISTENERS WITHOUT BLOCKING
+       * ==============================
+       */
+
+      runMessageListeners(
+        messageListeners,
+        {
+          sock,
+          message,
+          text,
+          isOwner,
+          isGroup:
+            isGroupChat,
+          isStatus:
+            isGroupStatusPost
         }
-      }
+      )
+
+      /*
+       * ==============================
+       * STATUS POSTS
+       * ==============================
+       */
 
       if (
         isGroupStatusPost
       ) {
         continue
       }
+
+      /*
+       * ==============================
+       * PREFIX CHECK
+       * ==============================
+       */
 
       if (
         !text ||
@@ -533,9 +587,21 @@ export async function handleMessages(
         continue
       }
 
+      /*
+       * ==============================
+       * OWNER CHECK
+       * ==============================
+       */
+
       if (!isOwner) {
         continue
       }
+
+      /*
+       * ==============================
+       * COMMAND PARSING
+       * ==============================
+       */
 
       const body =
         text
@@ -580,6 +646,12 @@ export async function handleMessages(
         }`
       )
 
+      /*
+       * ==============================
+       * REACTION
+       * ==============================
+       */
+
       try {
         await sock.sendMessage(
           rawJid,
@@ -610,10 +682,22 @@ export async function handleMessages(
         )
       } catch {}
 
+      /*
+       * ==============================
+       * QUOTED MESSAGE
+       * ==============================
+       */
+
       const quotedMessage =
         getQuotedMessage(
           message
         )
+
+      /*
+       * ==============================
+       * EXECUTE COMMAND
+       * ==============================
+       */
 
       await plugin.run({
         sock,
@@ -634,7 +718,9 @@ export async function handleMessages(
     } catch (error) {
       console.error(
         'Message handling error:',
-        error
+        error?.stack ||
+          error?.message ||
+          error
       )
     }
   }
@@ -665,7 +751,9 @@ export async function handleGroupParticipants(
     } catch (error) {
       console.error(
         '[Group Listener Error]:',
-        error
+        error?.stack ||
+          error?.message ||
+          error
       )
     }
   }
