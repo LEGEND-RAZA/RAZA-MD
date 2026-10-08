@@ -38,7 +38,7 @@ export default {
     if (!text) return
 
     const special = {
-      e: 'ɛ̽',
+      e: 'ə̽',
       u: ['ʊ', 'ʋ'],
       a: 'ʌ',
       n: 'η̽',
@@ -48,7 +48,7 @@ export default {
       r: 'ɼ',
       f: 'ƒ',
       m: 'ϻ̽',
-      o: 'σ'
+      o: '❍'
     }
 
     const smallcaps = {
