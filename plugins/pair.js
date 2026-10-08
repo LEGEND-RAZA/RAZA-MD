@@ -15,9 +15,58 @@ export const plugin = {
 
     if (!jid) return
 
-    const number =
+    /*
+     * ==============================
+     * GET NUMBER
+     * ==============================
+     */
+
+    let number =
       String(args?.[0] || '')
         .replace(/\D/g, '')
+
+    if (!number) {
+      const context =
+        message?.message
+          ?.extendedTextMessage
+          ?.contextInfo
+
+      const quotedParticipant =
+        context?.participantPn ||
+        context?.participant ||
+        context?.remoteJid
+
+      if (quotedParticipant) {
+        number =
+          String(quotedParticipant)
+            .split('@')[0]
+            .split(':')[0]
+            .replace(/\D/g, '')
+      }
+
+      if (!number) {
+        const quoted =
+          context?.quotedMessage
+
+        if (quoted) {
+          const quotedKey =
+            quoted?.key || {}
+
+          const quotedSender =
+            quotedKey.participantPn ||
+            quotedKey.participant ||
+            quotedKey.remoteJid
+
+          if (quotedSender) {
+            number =
+              String(quotedSender)
+                .split('@')[0]
+                .split(':')[0]
+                .replace(/\D/g, '')
+          }
+        }
+      }
+    }
 
     if (
       number.length < 7 ||
@@ -27,7 +76,7 @@ export const plugin = {
         jid,
         {
           text:
-            '❌ ᴜsᴇ: .ᴘᴀɪʀ 923xxxxxxxxx'
+            '❌ ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴘᴇʀsᴏɴ\'s ᴍᴇssᴀɢᴇ ᴏʀ ᴜsᴇ:\n\n.ᴘᴀɪʀ 923xxxxxxxxx'
         },
         {
           quoted: message
@@ -46,7 +95,7 @@ export const plugin = {
         jid,
         {
           text:
-            '⏳ ʀᴇǫᴜᴇsᴛɪɴɢ ᴘᴀɪʀɪɴɢ ᴄᴏᴅᴇ...'
+            `⏳ ʀᴇǫᴜᴇsᴛɪɴɢ ᴘᴀɪʀɪɴɢ ᴄᴏᴅᴇ...\n\n📱 ${number}`
         },
         {
           quoted: message
@@ -196,6 +245,9 @@ export const plugin = {
         jid,
         {
           text: code
+        },
+        {
+          quoted: message
         }
       )
 
@@ -241,6 +293,9 @@ export const plugin = {
           {
             text:
               `✓ 𝐒ᴇssɪᴏɴ 𝐑ᴇᴀᴅʏ\n\n${session}`
+          },
+          {
+            quoted: message
           }
         )
       }
