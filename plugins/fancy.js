@@ -40,7 +40,7 @@ export default {
     const special = {
       e: 'ə̽',
       u: ['ʊ', 'ʋ'],
-      a: 'ʌ',
+      a: 'ʌ̄',
       n: 'η̽',
       y: 'ɣ',
       l: 'ɭ',
@@ -56,7 +56,7 @@ export default {
       c: 'ᴄ',
       d: 'ᴅ',
       g: 'ɢ',
-      h: 'ʜ',
+      h: 'ⱶ꧊',
       i: 'ɪ',
       j: 'ᴊ',
       k: 'ᴋ',
