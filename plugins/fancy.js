@@ -39,7 +39,7 @@ export default {
 
     const special = {
       e: 'ə̽',
-      u: ['ʊ', 'ʋ'],
+      u: ['ʊ̊'],
       a: 'ʌ̄',
       n: 'η̽',
       y: 'ɣ',
@@ -48,7 +48,7 @@ export default {
       r: 'ɼ',
       f: 'ƒ',
       m: 'ϻ̽',
-      o: '❍'
+      o: '๏፝֟፝'
     }
 
     const smallcaps = {
@@ -56,7 +56,7 @@ export default {
       c: 'ᴄ',
       d: 'ᴅ',
       g: 'ɢ',
-      h: 'ⱶ꧊',
+      h: 'ⱶ֟ؖ꧊',
       i: 'ɪ',
       j: 'ᴊ',
       k: 'ᴋ',
@@ -64,7 +64,7 @@ export default {
       q: 'ǫ',
       s: 's',
       v: 'ᴠ',
-      w: 'ᴡ',
+      w: 'Ꮗ',
       x: 'x',
       z: 'ᴢ'
     }
