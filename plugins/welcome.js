@@ -31,6 +31,14 @@ function defaultWelcomeText() {
   )
 }
 
+function normalizeJid(jid) {
+  return String(jid || '').trim()
+}
+
+function normalizeGroupJid(jid) {
+  return normalizeJid(jid).split(':')[0]
+}
+
 function getSettings(jid) {
   const storage = getDb(DB_KEY, {})
 
@@ -46,10 +54,6 @@ function getSettings(jid) {
   return storage[jid]
 }
 
-function normalizeJid(jid) {
-  return String(jid || '').split(':')[0]
-}
-
 function getDedupeMap() {
   if (!(globalThis[DEDUPE_KEY] instanceof Map)) {
     globalThis[DEDUPE_KEY] = new Map()
@@ -58,12 +62,27 @@ function getDedupeMap() {
   return globalThis[DEDUPE_KEY]
 }
 
-function cleanDedupeMap(map, now) {
+function cleanDedupeMap(map, now = Date.now()) {
   for (const [key, timestamp] of map) {
     if (now - timestamp >= DEDUPE_WINDOW) {
       map.delete(key)
     }
   }
+}
+
+function getParticipantId(item) {
+  if (typeof item === 'string') return item
+
+  if (!item || typeof item !== 'object') return ''
+
+  return (
+    item.id ||
+    item.jid ||
+    item.phoneNumber ||
+    item.participantPn ||
+    item.lid ||
+    ''
+  )
 }
 
 /*
@@ -82,26 +101,29 @@ export const welcomeCommand = {
 
     if (!jid || !isGroup) return
 
-    const groupMetadata = await sock
+    const metadata = await sock
       .groupMetadata(jid)
       .catch(() => null)
 
-    if (!groupMetadata) return
+    if (!metadata) return
 
     const sender = normalizeJid(
       message?.key?.participant ||
       message?.key?.participantPn ||
       ''
-    )
+    ).split(':')[0]
 
-    const isAdmin = groupMetadata.participants.some(p => {
-      const participantJid = normalizeJid(
-        p.id || p.jid || ''
-      )
+    const isAdmin = (metadata.participants || []).some(participant => {
+      const participantId = normalizeJid(
+        participant.id || participant.jid || ''
+      ).split(':')[0]
 
       return (
-        participantJid === sender &&
-        (p.admin === 'admin' || p.admin === 'superadmin')
+        participantId === sender &&
+        (
+          participant.admin === 'admin' ||
+          participant.admin === 'superadmin'
+        )
       )
     })
 
@@ -195,11 +217,11 @@ export const welcomeCommand = {
       `⚙️ *${toSmallCaps('welcome settings')}*\n\n` +
       `• *${toSmallCaps('status')}:* ${status}\n\n` +
       `*${toSmallCaps('commands')}:*\n` +
-      `├ \`!welcome on\` - Enable welcome\n` +
-      `├ \`!welcome off\` - Disable welcome\n` +
-      `├ \`!welcome set <text>\` - Set custom welcome text\n` +
-      `├ \`!welcome get\` - View current text\n` +
-      `└ \`!welcome reset\` - Reset text\n\n` +
+      `├ \`${getPrefixForExample()}welcome on\` - Enable welcome\n` +
+      `├ \`${getPrefixForExample()}welcome off\` - Disable welcome\n` +
+      `├ \`${getPrefixForExample()}welcome set <text>\` - Set custom welcome text\n` +
+      `├ \`${getPrefixForExample()}welcome get\` - View current text\n` +
+      `└ \`${getPrefixForExample()}welcome reset\` - Reset text\n\n` +
       `*${toSmallCaps('placeholders')}:*\n` +
       `• \`&mention\` - Tags new member\n` +
       `• \`&group\` - Group name`
@@ -228,10 +250,12 @@ export const welcomeListener = {
   async run({ sock, update }) {
     if (!sock || !update) return
 
-    const { id, participants, action } = update
+    const rawGroupJid = normalizeJid(update.id)
+    const groupJid = normalizeGroupJid(rawGroupJid)
+    const { participants, action } = update
 
     if (
-      !id ||
+      !groupJid.endsWith('@g.us') ||
       action !== 'add' ||
       !Array.isArray(participants) ||
       participants.length === 0
@@ -240,97 +264,174 @@ export const welcomeListener = {
     }
 
     const storage = getDb(DB_KEY, {})
-    const settings = storage[id]
+    const settings =
+      storage[rawGroupJid] ||
+      storage[groupJid]
 
     if (!settings?.enabled) return
-
-    // Normalize and deduplicate participants within this event.
-    const userJids = [
-      ...new Set(
-        participants
-          .map(item =>
-            typeof item === 'string'
-              ? item
-              : item?.id || ''
-          )
-          .filter(Boolean)
-          .map(normalizeJid)
-          .filter(Boolean)
-      )
-    ]
-
-    if (!userJids.length) return
 
     const now = Date.now()
     const processed = getDedupeMap()
 
     cleanDedupeMap(processed, now)
 
-    // Claim each participant before any await, preventing overlapping
-    // event handlers from sending the same welcome twice.
-    const newUsers = userJids.filter(userJid => {
-      const key = `${id}:${userJid}`
-      const previousTime = processed.get(key)
+    /*
+     * Claim each participant synchronously before the first await.
+     * This prevents overlapping duplicate events from sending twice.
+     */
+    const claimed = []
+
+    for (const participant of participants) {
+      const participantJid = getParticipantId(participant)
+      if (!participantJid) continue
+
+      const dedupeId = normalizeJid(participantJid)
+      const dedupeKey = `${groupJid}:${dedupeId}`
+      const previous = processed.get(dedupeKey)
 
       if (
-        previousTime &&
-        now - previousTime < DEDUPE_WINDOW
+        previous !== undefined &&
+        now - previous < DEDUPE_WINDOW
       ) {
-        return false
+        continue
       }
 
-      processed.set(key, now)
-      return true
-    })
+      processed.set(dedupeKey, now)
 
-    if (!newUsers.length) return
+      claimed.push({
+        participantJid,
+        dedupeId,
+        dedupeKey
+      })
+    }
+
+    if (!claimed.length) return
 
     try {
       const metadata = await sock
-        .groupMetadata(id)
+        .groupMetadata(rawGroupJid)
         .catch(() => null)
 
       const groupName = metadata?.subject || 'Group'
+      const canonicalByAlias = new Map()
 
-      for (const userJid of newUsers) {
-        const key = `${id}:${userJid}`
+      /*
+       * Match alternate participant identifiers when Baileys
+       * exposes them in the group participant metadata.
+       */
+      for (const participant of metadata?.participants || []) {
+        const ids = [
+          participant.id,
+          participant.jid,
+          participant.phoneNumber,
+          participant.lid,
+          participant.participantPn
+        ]
+          .filter(Boolean)
+          .map(normalizeJid)
 
+        const phoneJid = ids.find(id =>
+          id.endsWith('@s.whatsapp.net')
+        )
+
+        const canonical = phoneJid || ids[0]
+        if (!canonical) continue
+
+        for (const id of ids) {
+          canonicalByAlias.set(id, canonical)
+        }
+      }
+
+      const latestStorage = getDb(DB_KEY, {})
+      const latestSettings =
+        latestStorage[rawGroupJid] ||
+        latestStorage[groupJid]
+
+      if (!latestSettings?.enabled) {
+        for (const user of claimed) {
+          processed.delete(user.dedupeKey)
+        }
+        return
+      }
+
+      const queued = new Map()
+
+      for (const user of claimed) {
+        const canonical =
+          canonicalByAlias.get(user.participantJid) ||
+          canonicalByAlias.get(user.dedupeId) ||
+          user.dedupeId
+
+        const canonicalKey = `${groupJid}:${canonical}`
+        const canonicalTime = processed.get(canonicalKey)
+
+        /*
+         * If this event used an alternate JID but another event
+         * already claimed its canonical identity, don't send again.
+         */
+        if (
+          canonicalKey !== user.dedupeKey &&
+          canonicalTime !== undefined &&
+          now - canonicalTime < DEDUPE_WINDOW
+        ) {
+          processed.delete(user.dedupeKey)
+          continue
+        }
+
+        processed.set(canonicalKey, now)
+
+        const mentionJid =
+          user.participantJid.endsWith('@s.whatsapp.net')
+            ? user.participantJid
+            : canonical
+
+        if (!queued.has(canonicalKey)) {
+          queued.set(canonicalKey, {
+            canonicalKey,
+            mentionJid
+          })
+        }
+      }
+
+      for (const user of queued.values()) {
         try {
-          // Read the latest saved text in case it was changed.
-          const latestStorage = getDb(DB_KEY, {})
-          const latestSettings = latestStorage[id]
+          const currentStorage = getDb(DB_KEY, {})
+          const currentSettings =
+            currentStorage[rawGroupJid] ||
+            currentStorage[groupJid]
 
-          if (!latestSettings?.enabled) {
-            processed.delete(key)
+          if (!currentSettings?.enabled) {
+            processed.delete(user.canonicalKey)
             continue
           }
 
           const template = String(
-            latestSettings.text || defaultWelcomeText()
+            currentSettings.text || defaultWelcomeText()
           )
 
           const text = template
-            .replace(/&mention/g, `@${userJid.split('@')[0]}`)
+            .replace(
+              /&mention/g,
+              `@${user.mentionJid.split('@')[0]}`
+            )
             .replace(/&group/g, groupName)
 
-          await sock.sendMessage(id, {
+          await sock.sendMessage(groupJid, {
             text,
-            mentions: [userJid]
+            mentions: [user.mentionJid]
           })
         } catch (error) {
-          // Allow a later event to retry if sending failed.
-          processed.delete(key)
+          processed.delete(user.canonicalKey)
 
           console.error(
             '[Welcome Send Error]',
-            error?.message || error
+            error?.stack || error?.message || error
           )
         }
       }
     } catch (error) {
-      // Release the claims if group metadata or another outer step fails.
-      for (const userJid of newUsers) {
-        processed.delete(`${id}:${userJid}`)
+      for (const user of claimed) {
+        processed.delete(user.dedupeKey)
       }
 
       console.error(
