@@ -7,6 +7,11 @@ const SETTINGS_FILE = 'autoreply.json'
 
 const MAX_MESSAGE_LENGTH = 4000
 const MAX_REPLY_LENGTH = 1000
+const MAX_QUEUE_PER_CONVERSATION = 50
+const MAX_CONVERSATIONS = 500
+const MAX_RECENT_IDS = 2000
+const MAX_TRACKED_REPLIES = 1000
+const API_TIMEOUT = 30000
 
 const ALLOWED_EMOJIS = [
   '😭', '💋', '🌷', '🫂', '💗', '👀', '🌚', '🥲',
@@ -42,14 +47,31 @@ const LENGTH_TOKENS = {
   long: 800
 }
 
-let settings = { ...DEFAULT_SETTINGS }
+let settings = {
+  ...DEFAULT_SETTINGS,
+  allowedGroups: [],
+  blockedGroups: []
+}
+
 let initialized = false
 let initPromise = null
 
+// Conversation history is kept in memory.
 const conversations = new Map()
-const busy = new Set()
+
+// Every conversation has its own sequential message queue.
+const messageQueues = new Map()
+const processingChats = new Set()
+
+// Prevent duplicate processing of the same WhatsApp message.
 const recentIds = new Set()
+
+// Last successful reply timestamp per conversation.
 const lastReplies = new Map()
+
+// --------------------------------------------------
+// SETTINGS AND DATABASE
+// --------------------------------------------------
 
 async function initializeSettings() {
   if (initialized) return
@@ -57,17 +79,21 @@ async function initializeSettings() {
 
   initPromise = (async () => {
     try {
-      const stored = await getDb(SETTINGS_FILE)
+      const stored = await getDb(SETTINGS_FILE, DEFAULT_SETTINGS)
 
       if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
         settings = {
           ...DEFAULT_SETTINGS,
           ...stored,
           allowedGroups: Array.isArray(stored.allowedGroups)
-            ? stored.allowedGroups
+            ? [...new Set(stored.allowedGroups.filter(
+                id => typeof id === 'string'
+              ))]
             : [],
           blockedGroups: Array.isArray(stored.blockedGroups)
-            ? stored.blockedGroups
+            ? [...new Set(stored.blockedGroups.filter(
+                id => typeof id === 'string'
+              ))]
             : []
         }
       }
@@ -81,7 +107,11 @@ async function initializeSettings() {
     initialized = true
   })()
 
-  return initPromise
+  try {
+    await initPromise
+  } finally {
+    initPromise = null
+  }
 }
 
 async function persistSettings() {
@@ -99,14 +129,25 @@ async function persistSettings() {
 
 async function updateSettings(changes) {
   await initializeSettings()
-  settings = { ...settings, ...changes }
+
+  settings = {
+    ...settings,
+    ...changes
+  }
+
   return persistSettings()
 }
+
+// --------------------------------------------------
+// GENERAL HELPERS
+// --------------------------------------------------
 
 function trimMap(map, limit) {
   while (map.size > limit) {
     const key = map.keys().next().value
+
     if (key === undefined) break
+
     map.delete(key)
   }
 }
@@ -119,7 +160,7 @@ function getText(message, suppliedText = '') {
   const content = message?.message
   if (!content) return ''
 
-  return (
+  return String(
     content.conversation ||
     content.extendedTextMessage?.text ||
     content.imageMessage?.caption ||
@@ -154,7 +195,10 @@ function isAllowedChat(jid) {
 
 function isGroupAllowed(jid) {
   if (!settings.groups) return false
-  if (settings.blockedGroups.includes(jid)) return false
+
+  if (settings.blockedGroups.includes(jid)) {
+    return false
+  }
 
   if (settings.groupMode === 'selected') {
     return settings.allowedGroups.includes(jid)
@@ -175,6 +219,20 @@ function getConversationKey(jid, message) {
 
   return jid
 }
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function normalizeGroupList(values) {
+  return [...new Set(
+    values.filter(value => typeof value === 'string')
+  )]
+}
+
+// --------------------------------------------------
+// AI PROMPT AND FORMATTING
+// --------------------------------------------------
 
 function buildSystemPrompt() {
   const lengthInstructions = {
@@ -241,17 +299,25 @@ function formatReply(rawReply) {
     .trim()
 
   const body = text || 'HMM OKAY THEK HO GYA'
-  const emojis = foundEmojis.length ? foundEmojis.join('') : '🙂'
+  const emojis = foundEmojis.length
+    ? foundEmojis.join('')
+    : '🙂'
 
   return `- _${body}"_ ${emojis}`
 }
 
-async function generateReply(key, userText) {
+// --------------------------------------------------
+// GEMINI API
+// --------------------------------------------------
+
+async function generateReply(conversationKey, userText) {
   if (!API_KEY) {
-    throw new Error('GEMINI_API_KEY IS MISSING FROM ENVIRONMENT VARIABLES')
+    throw new Error(
+      'GEMINI_API_KEY IS MISSING FROM ENVIRONMENT VARIABLES'
+    )
   }
 
-  const history = conversations.get(key) || []
+  const history = conversations.get(conversationKey) || []
 
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`,
@@ -267,7 +333,10 @@ async function generateReply(key, userText) {
         },
         contents: [
           ...history,
-          { role: 'user', parts: [{ text: userText }] }
+          {
+            role: 'user',
+            parts: [{ text: userText }]
+          }
         ],
         generationConfig: {
           temperature: 0.9,
@@ -275,7 +344,7 @@ async function generateReply(key, userText) {
           maxOutputTokens: LENGTH_TOKENS[settings.length] || 450
         }
       }),
-      signal: AbortSignal.timeout(30000)
+      signal: AbortSignal.timeout(API_TIMEOUT)
     }
   )
 
@@ -300,21 +369,45 @@ async function generateReply(key, userText) {
 
   const reply = formatReply(rawReply)
 
+  // Only commit history after a reply has actually been sent.
+  // The caller invokes commitConversation after successful delivery.
+  return {
+    reply,
+    userText,
+    conversationKey
+  }
+}
+
+function commitConversation(conversationKey, userText, reply) {
+  const history = conversations.get(conversationKey) || []
+
   const updatedHistory = [
     ...history,
-    { role: 'user', parts: [{ text: userText }] },
-    { role: 'model', parts: [{ text: reply }] }
+    {
+      role: 'user',
+      parts: [{ text: userText }]
+    },
+    {
+      role: 'model',
+      parts: [{ text: reply }]
+    }
   ]
 
+  const pairLimit = Number(settings.historyPairs) || 0
+
   conversations.set(
-    key,
-    updatedHistory.slice(-settings.historyPairs * 2)
+    conversationKey,
+    pairLimit > 0
+      ? updatedHistory.slice(-pairLimit * 2)
+      : []
   )
 
-  trimMap(conversations, 500)
-
-  return reply
+  trimMap(conversations, MAX_CONVERSATIONS)
 }
+
+// --------------------------------------------------
+// MESSAGE SENDING
+// --------------------------------------------------
 
 async function send(sock, jid, text, message) {
   return sock.sendMessage(
@@ -328,11 +421,15 @@ function getGroupState(jid) {
   if (settings.blockedGroups.includes(jid)) return false
 
   if (settings.groupMode === 'selected') {
-    return settings.allowedGroups.includes(jid)
+    return settings.groups && settings.allowedGroups.includes(jid)
   }
 
   return settings.groups
 }
+
+// --------------------------------------------------
+// COMMAND HELP
+// --------------------------------------------------
 
 function usageText() {
   return [
@@ -365,6 +462,10 @@ function usageText() {
     '.autoreply reset'
   ].join('\n')
 }
+
+// --------------------------------------------------
+// AUTOREPLY COMMAND
+// --------------------------------------------------
 
 const autoReplyCommand = {
   command: 'autoreply',
@@ -408,7 +509,9 @@ const autoReplyCommand = {
         return send(sock, jid, 'USE .AUTOREPLY INBOX ON OR OFF', message)
       }
 
-      const saved = await updateSettings({ inbox: value === 'on' })
+      const saved = await updateSettings({
+        inbox: value === 'on'
+      })
 
       return send(
         sock,
@@ -501,7 +604,11 @@ const autoReplyCommand = {
       let blockedGroups = [...settings.blockedGroups]
 
       if (state === 'on') {
-        allowedGroups = [...new Set([...allowedGroups, groupJid])]
+        allowedGroups = normalizeGroupList([
+          ...allowedGroups,
+          groupJid
+        ])
+
         blockedGroups = blockedGroups.filter(id => id !== groupJid)
 
         const saved = await updateSettings({
@@ -524,7 +631,10 @@ const autoReplyCommand = {
       }
 
       allowedGroups = allowedGroups.filter(id => id !== groupJid)
-      blockedGroups = [...new Set([...blockedGroups, groupJid])]
+      blockedGroups = normalizeGroupList([
+        ...blockedGroups,
+        groupJid
+      ])
 
       const saved = await updateSettings({
         allowedGroups,
@@ -560,7 +670,11 @@ const autoReplyCommand = {
       let blockedGroups = [...settings.blockedGroups]
 
       if (action === 'allow') {
-        allowedGroups = [...new Set([...allowedGroups, target])]
+        allowedGroups = normalizeGroupList([
+          ...allowedGroups,
+          target
+        ])
+
         blockedGroups = blockedGroups.filter(id => id !== target)
 
         const saved = await updateSettings({
@@ -579,7 +693,11 @@ const autoReplyCommand = {
       }
 
       allowedGroups = allowedGroups.filter(id => id !== target)
-      blockedGroups = [...new Set([...blockedGroups, target])]
+
+      blockedGroups = normalizeGroupList([
+        ...blockedGroups,
+        target
+      ])
 
       const saved = await updateSettings({
         allowedGroups,
@@ -672,7 +790,12 @@ const autoReplyCommand = {
       const key = getConversationKey(jid, message)
       conversations.delete(key)
 
-      return send(sock, jid, 'CURRENT CONVERSATION HISTORY CLEARED 🥲', message)
+      return send(
+        sock,
+        jid,
+        'CURRENT CONVERSATION HISTORY CLEARED 🥲',
+        message
+      )
     }
 
     if (action === 'reset') {
@@ -713,7 +836,9 @@ const autoReplyCommand = {
           `LENGTH ${settings.length.toUpperCase()}`,
           `COOLDOWN ${settings.cooldown} SECONDS`,
           `HISTORY ${settings.historyPairs} PAIRS`,
-          `MODEL ${MODEL}`
+          `MODEL ${MODEL}`,
+          `ACTIVE QUEUES ${processingChats.size}`,
+          `QUEUED CONVERSATIONS ${messageQueues.size}`
         ].join('\n'),
         message
       )
@@ -723,12 +848,94 @@ const autoReplyCommand = {
   }
 }
 
+// --------------------------------------------------
+// QUEUE PROCESSOR
+// --------------------------------------------------
+
+async function processMessageQueue(conversationKey, sock) {
+  if (processingChats.has(conversationKey)) return
+
+  processingChats.add(conversationKey)
+
+  try {
+    const queue = messageQueues.get(conversationKey)
+    if (!queue) return
+
+    while (queue.length > 0) {
+      const item = queue.shift()
+      if (!item) continue
+
+      const { jid, message, userText } = item
+
+      try {
+        await initializeSettings()
+
+        if (!settings.enabled) continue
+
+        const isGroup = jid.endsWith('@g.us')
+
+        if (isGroup && !isGroupAllowed(jid)) continue
+        if (!isGroup && !settings.inbox) continue
+
+        // Respect cooldown without discarding queued messages.
+        const lastReply = lastReplies.get(conversationKey) || 0
+        const remaining =
+          settings.cooldown * 1000 - (Date.now() - lastReply)
+
+        if (remaining > 0) {
+          await wait(remaining)
+        }
+
+        // Check settings again after waiting.
+        if (!settings.enabled) continue
+        if (isGroup && !isGroupAllowed(jid)) continue
+        if (!isGroup && !settings.inbox) continue
+
+        const result = await generateReply(conversationKey, userText)
+
+        await sock.sendMessage(
+          jid,
+          { text: result.reply },
+          { quoted: message }
+        )
+
+        commitConversation(
+          conversationKey,
+          userText,
+          result.reply
+        )
+
+        lastReplies.set(conversationKey, Date.now())
+        trimMap(lastReplies, MAX_TRACKED_REPLIES)
+      } catch (error) {
+        console.error(
+          `[AI AUTOREPLY] MESSAGE ERROR (${jid}):`,
+          error?.message || error
+        )
+      }
+    }
+  } finally {
+    processingChats.delete(conversationKey)
+
+    const queue = messageQueues.get(conversationKey)
+
+    if (queue?.length) {
+      // Continue if a message arrived while this queue was finishing.
+      void processMessageQueue(conversationKey, sock)
+    } else {
+      messageQueues.delete(conversationKey)
+    }
+  }
+}
+
+// --------------------------------------------------
+// MESSAGE LISTENER
+// --------------------------------------------------
+
 const autoReplyListener = {
   command: '__autoreply_listener',
 
   async run({ sock, message, text, isStatus }) {
-    let conversationKey
-
     try {
       await initializeSettings()
 
@@ -749,43 +956,45 @@ const autoReplyListener = {
       if (isCommand(userText)) return
 
       const messageId = message.key.id
-      const dedupeKey = messageId ? `${jid}:${messageId}` : null
+      const dedupeKey = messageId
+        ? `${jid}:${messageId}`
+        : null
 
       if (dedupeKey && recentIds.has(dedupeKey)) return
 
       if (dedupeKey) {
         recentIds.add(dedupeKey)
-        trimMap(recentIds, 2000)
+        trimMap(recentIds, MAX_RECENT_IDS)
       }
 
-      conversationKey = getConversationKey(jid, message)
+      const conversationKey = getConversationKey(jid, message)
 
-      if (busy.has(conversationKey)) return
+      if (!messageQueues.has(conversationKey)) {
+        messageQueues.set(conversationKey, [])
+      }
 
-      const now = Date.now()
-      const lastReply = lastReplies.get(conversationKey) || 0
+      const queue = messageQueues.get(conversationKey)
 
-      if (now - lastReply < settings.cooldown * 1000) return
-
-      busy.add(conversationKey)
-      lastReplies.set(conversationKey, now)
-      trimMap(lastReplies, 1000)
-
-      try {
-        const reply = await generateReply(conversationKey, userText)
-
-        await sock.sendMessage(
-          jid,
-          { text: reply },
-          { quoted: message }
+      if (queue.length >= MAX_QUEUE_PER_CONVERSATION) {
+        console.warn(
+          `[AI AUTOREPLY] QUEUE FULL (${jid}); MESSAGE SKIPPED`
         )
-      } finally {
-        busy.delete(conversationKey)
+        return
       }
-    } catch (error) {
-      if (conversationKey) busy.delete(conversationKey)
 
-      console.error('[AI AUTOREPLY]', error?.message || error)
+      queue.push({
+        jid,
+        message,
+        userText
+      })
+
+      // Process in the background; don't wait for Gemini here.
+      void processMessageQueue(conversationKey, sock)
+    } catch (error) {
+      console.error(
+        '[AI AUTOREPLY] LISTENER ERROR:',
+        error?.message || error
+      )
     }
   }
 }
