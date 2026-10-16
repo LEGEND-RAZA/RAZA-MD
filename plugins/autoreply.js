@@ -2,7 +2,7 @@
 import { getDb, saveDb } from '../database/index.js'
 
 const API_KEY = process.env.GEMINI_API_KEY
-const MODEL = 'gemini-2.5-flash'
+const MODEL = 'gemini-3.8-flash'
 const SETTINGS_FILE = 'autoreply.json'
 
 const MAX_MESSAGE_LENGTH = 4000
