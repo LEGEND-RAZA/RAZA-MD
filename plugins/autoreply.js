@@ -11,7 +11,7 @@ const MAX_QUEUE_PER_CONVERSATION = 50
 const MAX_CONVERSATIONS = 500
 const MAX_RECENT_IDS = 2000
 const MAX_TRACKED_REPLIES = 1000
-const API_TIMEOUT = 30000
+const API_TIMEOUT = 90000
 
 const ALLOWED_EMOJIS = [
   '😭', '💋', '🌷', '🫂', '💗', '👀', '🌚', '🥲',
