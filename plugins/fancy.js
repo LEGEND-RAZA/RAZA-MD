@@ -38,7 +38,7 @@ export default {
     if (!text) return
 
     const special = {
-      e: 'ə̽',
+      e: 'ɜ̚',
       u: ['ʊ̊'],
       a: 'ʌ̄',
       n: 'η̽',
@@ -59,8 +59,8 @@ export default {
       h: 'ⱶ֟ؖ꧊',
       i: 'ɪ',
       j: 'ᴊ',
-      k: 'ᴋ',
-      p: 'ᴘ',
+      k: 'ƙ',
+      p: 'ρ̚',
       q: 'ǫ',
       s: 's',
       v: 'ᴠ',
