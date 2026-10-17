@@ -146,7 +146,7 @@ export default {
 
     await sock.sendMessage(jid, {
       text:
-        `𝀈᪳𝆺𝅥𝆬᷼𓄹𝅮𝅯${first} 💀🐍🔥〬⃝̥𝆺𝆭𝆬𝆭𝆬`
+        `𓆩֓⤹${first}⤸֓𓆪`
     })
 
     await sock.sendMessage(jid, {
