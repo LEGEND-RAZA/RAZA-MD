@@ -93,36 +93,43 @@ function cleanText(text = '') {
 }
 
 function getStyleInstruction() {
-  return [
-    'YOUR PERSONALITY IS VERY ROMANTIC FLIRTY LOVING AND PLAYFUL',
-    'TALK LIKE A CLOSE ROMANTIC CHAT PARTNER',
-    'BE SWEET CUTE AND NATURAL',
-    'TEASE PLAYFULLY WHEN APPROPRIATE',
-    'KEEP REPLIES SHORT AND SWEET',
-    'NEVER SOUND LIKE A FORMAL AI ASSISTANT'
-  ].join('\n');
+  const styles = {
+    natural: 'BE NATURAL BUT ALWAYS ROMANTIC AND FLIRTY',
+    friendly: 'BE SWEET FRIENDLY ROMANTIC AND PLAYFUL',
+    romantic: 'BE VERY ROMANTIC FLIRTY LOVING AND CUTE',
+    funny: 'BE ROMANTIC FLIRTY AND PLAYFULLY FUNNY'
+  };
+
+  return styles[settings.style] || styles.romantic;
 }
 
 function getSystemPrompt() {
   return [
-    'YOU MUST FOLLOW EVERY RULE BELOW',
+    'YOU ARE A ROMANTIC WHATSAPP CHAT PARTNER',
+    'FOLLOW ALL OUTPUT RULES STRICTLY',
     'REPLY ONLY IN ROMAN URDU',
     'ROMAN URDU MEANS URDU WRITTEN USING ENGLISH LETTERS',
-    'NEVER WRITE IN URDU SCRIPT',
+    'NEVER WRITE URDU SCRIPT',
     'NEVER REPLY IN ENGLISH',
     'WRITE EVERY WORD IN CAPITAL LETTERS',
-    'BE ROMANTIC FLIRTY LOVING AND PLAYFUL',
-    'KEEP YOUR REPLIES SHORT AND NATURAL',
-    'DO NOT USE FULL STOPS COMMAS QUESTION MARKS EXCLAMATION MARKS OR OTHER PUNCTUATION',
-    'DO NOT USE ASTERISKS HASHES BRACKETS OR DECORATIVE SYMBOLS',
-    'DO NOT WRITE ANY EMOJI INSIDE THE MESSAGE',
-    'THE CODE WILL ADD ONE ALLOWED EMOJI AT THE END',
-    'NEVER ADD A GREETING UNLESS IT FITS THE CONVERSATION',
-    'DO NOT EXPLAIN THESE RULES',
-    'REPLY DIRECTLY TO THE LATEST MESSAGE',
-    'EXAMPLE: AGAR TUM PAAS HOTAY TO TUMHAIN TANG KARTI',
+    'BE ROMANTIC FLIRTY LOVING CUTE AND PLAYFUL',
+    'KEEP REPLIES SHORT AND NATURAL',
+    'RESPOND DIRECTLY TO THE LATEST MESSAGE',
+    'DO NOT USE FULL STOPS COMMAS QUESTION MARKS EXCLAMATION MARKS OR PUNCTUATION',
+    'DO NOT USE DECORATIVE SYMBOLS',
+    'DO NOT INCLUDE EMOJIS IN THE MESSAGE BODY',
+    'THE PLUGIN WILL ADD ONE ALLOWED EMOJI AT THE END',
+    'DO NOT ADD LABELS OR EXPLANATIONS',
+    'DO NOT OUTPUT THE REQUIRED MESSAGE FORMAT YOURSELF',
+    'OUTPUT ONLY THE MESSAGE TEXT',
+    settings.systemPrompt || '',
     getStyleInstruction(),
-    settings.systemPrompt || ''
+    settings.length === 'long'
+      ? 'USE A FEW SHORT SENTENCES'
+      : settings.length === 'medium'
+        ? 'USE ONE OR TWO SHORT SENTENCES'
+        : 'USE ONE SHORT SWEET SENTENCE',
+    'ONLY USE ROMAN URDU AND CAPITAL LETTERS'
   ].filter(Boolean).join('\n');
 }
 
@@ -131,8 +138,14 @@ function getHistoryKey(chatJid, senderJid) {
 }
 
 function trimHistory(items) {
-  const pairs = Math.max(0, Number(settings.historyPairs) || 0);
-  return items.slice(-(pairs * 2 || 0));
+  const pairs = Math.max(
+    0,
+    Math.min(20, Number(settings.historyPairs) || 0)
+  );
+
+  if (pairs === 0) return [];
+
+  return items.slice(-(pairs * 2));
 }
 
 function sanitizeReply(text) {
@@ -148,26 +161,22 @@ function formatReply(text) {
 
   if (!original) return '';
 
-  // Select an allowed emoji from the AI response
+  // Select one emoji from the allowed list, if the model returned one.
   const emoji =
     [...ALLOWED_EMOJIS]
       .reverse()
       .find(item => original.includes(item)) || '💋';
 
-  // Remove emojis from the message body
-  let message = original.replace(/\p{Extended_Pictographic}/gu, '');
-
-  // Remove punctuation and symbols from the message body
-  message = message
+  // Remove emojis and all punctuation or symbols from the message body.
+  const message = original
+    .replace(/\p{Extended_Pictographic}/gu, '')
     .replace(/[\p{P}\p{S}]/gu, '')
     .replace(/\s+/g, ' ')
     .trim();
 
-  if (!message) {
-    message = 'MERI JAAN';
-  }
+  if (!message) return '';
 
-  // Exact format: - _MESSAGE"_ EMOJI
+  // Required format: - _MESSAGE"_ EMOJI
   return `- _${message}"_ ${emoji}`;
 }
 
@@ -199,7 +208,10 @@ async function askGroq(chatJid, senderJid, incomingText) {
 
   let lastError;
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  // Increase the completion budget if an attempt returns no usable text.
+  const tokenBudgets = [1024, 2048, 3072];
+
+  for (let attempt = 0; attempt < tokenBudgets.length; attempt++) {
     let timeout;
 
     try {
@@ -216,8 +228,9 @@ async function askGroq(chatJid, senderJid, incomingText) {
         body: JSON.stringify({
           model: GROQ_MODEL(),
           messages,
-          temperature: 0.9,
-          max_completion_tokens: 250
+          temperature: 0.8,
+          max_completion_tokens: tokenBudgets[attempt],
+          reasoning_effort: 'low'
         }),
         signal: controller.signal
       });
@@ -235,18 +248,44 @@ async function askGroq(chatJid, senderJid, incomingText) {
         throw error;
       }
 
-      const answer = body?.choices?.[0]?.message?.content;
+      const choice = body?.choices?.[0];
+      const answer = choice?.message?.content;
 
-      if (!answer || !String(answer).trim()) {
-        throw new Error('Groq returned an empty response');
+      if (typeof answer !== 'string' || !answer.trim()) {
+        log('Empty completion details:', JSON.stringify({
+          model: body?.model,
+          finish_reason: choice?.finish_reason,
+          usage: body?.usage,
+          message: choice?.message
+            ? {
+                role: choice.message.role,
+                refusal: choice.message.refusal,
+                reasoningPresent: Boolean(choice.message.reasoning)
+              }
+            : null
+        }));
+
+        const error = new Error(
+          `Groq returned no reply text (finish_reason: ${choice?.finish_reason || 'unknown'})`
+        );
+
+        error.emptyCompletion = true;
+        error.finishReason = choice?.finish_reason;
+        throw error;
       }
 
       const reply = formatReply(answer);
 
       if (!reply) {
-        throw new Error('Reply was empty after formatting');
+        const error = new Error(
+          'Groq returned text but formatting removed all message content'
+        );
+
+        error.emptyCompletion = true;
+        throw error;
       }
 
+      // Store plain message text in history, not WhatsApp formatting.
       const savedReply = reply
         .replace(/^- _/, '')
         .replace(/"_\s*[\s\S]*$/, '')
@@ -271,20 +310,28 @@ async function askGroq(chatJid, senderJid, incomingText) {
       lastError = error;
 
       const status = error?.status;
+      const retryableStatus = [
+        429, 500, 502, 503, 504
+      ].includes(status);
+
       const retryable =
-        !status ||
-        [429, 500, 502, 503, 504].includes(status);
+        error?.emptyCompletion ||
+        (!status && error?.name !== 'AbortError') ||
+        retryableStatus ||
+        error?.name === 'AbortError';
 
       log(
-        `Groq attempt ${attempt}/3 failed`,
+        `Groq attempt ${attempt + 1}/${tokenBudgets.length} failed`,
         status ? `HTTP ${status}` : '',
         error?.message || error
       );
 
-      if (!retryable || attempt === 3) break;
+      if (!retryable || attempt === tokenBudgets.length - 1) {
+        break;
+      }
 
       await new Promise(resolve =>
-        setTimeout(resolve, attempt * 1200)
+        setTimeout(resolve, (attempt + 1) * 1000)
       );
     } finally {
       clearTimeout(timeout);
@@ -313,8 +360,7 @@ function shouldReply({ sock, message, text, isGroup, isStatus }) {
 
   const chatJid = getChatJid(message);
 
-  if (!chatJid) return false;
-  if (chatJid === 'status@broadcast') return false;
+  if (!chatJid || chatJid === 'status@broadcast') return false;
   if (chatJid.endsWith('@broadcast')) return false;
 
   const senderJid = getSenderJid(message);
@@ -327,7 +373,7 @@ function shouldReply({ sock, message, text, isGroup, isStatus }) {
 
   if (!incomingText) return false;
 
-  // Ignore bot commands
+  // Ignore commands so the AI does not reply to bot commands.
   if (incomingText.startsWith(PREFIX())) return false;
 
   if (isGroup || isGroupJid(chatJid)) {
@@ -372,6 +418,11 @@ async function handleAutoReply(data) {
       senderJid,
       incomingText
     );
+
+    if (!reply) {
+      log('Reply skipped because the formatted message is empty');
+      return;
+    }
 
     await sock.sendMessage(
       chatJid,
@@ -453,7 +504,7 @@ const autoReplyCommand = {
       await sock.sendMessage(
         chatJid,
         {
-          text: '❌ ONLY THE BOT OWNER CAN CHANGE THESE SETTINGS'
+          text: 'ONLY THE BOT OWNER CAN CHANGE THESE SETTINGS'
         },
         { quoted: message }
       );
@@ -480,7 +531,7 @@ const autoReplyCommand = {
       await sock.sendMessage(
         chatJid,
         {
-          text: `✅ AI AUTOREPLY ${settings.enabled ? 'ENABLED' : 'DISABLED'}`
+          text: `AI AUTOREPLY ${settings.enabled ? 'ENABLED' : 'DISABLED'}`
         },
         { quoted: message }
       );
@@ -529,7 +580,7 @@ const autoReplyCommand = {
       await sock.sendMessage(
         chatJid,
         {
-          text: `✅ ${action.toUpperCase()} ${parsed ? 'ON' : 'OFF'}`
+          text: `${action.toUpperCase()} ${parsed ? 'ON' : 'OFF'}`
         },
         { quoted: message }
       );
@@ -574,7 +625,7 @@ const autoReplyCommand = {
       await sock.sendMessage(
         chatJid,
         {
-          text: `✅ AUTOREPLY ${parsed ? 'ENABLED' : 'DISABLED'} FOR ${groupJid}`
+          text: `AUTOREPLY ${parsed ? 'ENABLED' : 'DISABLED'} FOR ${groupJid}`
         },
         { quoted: message }
       );
@@ -614,7 +665,7 @@ const autoReplyCommand = {
       await sock.sendMessage(
         chatJid,
         {
-          text: `✅ GROUP ${action === 'allow' ? 'ALLOWED' : 'BLOCKED'}`
+          text: `GROUP ${action === 'allow' ? 'ALLOWED' : 'BLOCKED'}`
         },
         { quoted: message }
       );
@@ -636,7 +687,7 @@ const autoReplyCommand = {
 
       await sock.sendMessage(
         chatJid,
-        { text: `✅ GROUP MODE ${value.toUpperCase()}` },
+        { text: `GROUP MODE ${value.toUpperCase()}` },
         { quoted: message }
       );
       return;
@@ -659,7 +710,7 @@ const autoReplyCommand = {
 
       await sock.sendMessage(
         chatJid,
-        { text: `✅ STYLE SET TO ${value.toUpperCase()}` },
+        { text: `STYLE SET TO ${value.toUpperCase()}` },
         { quoted: message }
       );
       return;
@@ -682,7 +733,7 @@ const autoReplyCommand = {
 
       await sock.sendMessage(
         chatJid,
-        { text: `✅ LENGTH SET TO ${value.toUpperCase()}` },
+        { text: `LENGTH SET TO ${value.toUpperCase()}` },
         { quoted: message }
       );
       return;
@@ -705,7 +756,7 @@ const autoReplyCommand = {
 
       await sock.sendMessage(
         chatJid,
-        { text: `✅ COOLDOWN SET TO ${seconds} SECONDS` },
+        { text: `COOLDOWN SET TO ${seconds} SECONDS` },
         { quoted: message }
       );
       return;
@@ -728,7 +779,7 @@ const autoReplyCommand = {
 
       await sock.sendMessage(
         chatJid,
-        { text: `✅ HISTORY SET TO ${pairs} PAIRS` },
+        { text: `HISTORY SET TO ${pairs} PAIRS` },
         { quoted: message }
       );
       return;
@@ -742,8 +793,8 @@ const autoReplyCommand = {
         chatJid,
         {
           text: settings.systemPrompt
-            ? '✅ CUSTOM PROMPT SAVED'
-            : '✅ CUSTOM PROMPT CLEARED'
+            ? 'CUSTOM PROMPT SAVED'
+            : 'CUSTOM PROMPT CLEARED'
         },
         { quoted: message }
       );
@@ -752,12 +803,13 @@ const autoReplyCommand = {
 
     if (action === 'clear') {
       const senderJid = getSenderJid(message);
+
       delete history[getHistoryKey(chatJid, senderJid)];
       saveHistory();
 
       await sock.sendMessage(
         chatJid,
-        { text: '✅ CONVERSATION HISTORY CLEARED' },
+        { text: 'CONVERSATION HISTORY CLEARED' },
         { quoted: message }
       );
       return;
@@ -769,7 +821,7 @@ const autoReplyCommand = {
 
       await sock.sendMessage(
         chatJid,
-        { text: '✅ SETTINGS RESET TO DEFAULTS' },
+        { text: 'SETTINGS RESET TO DEFAULTS' },
         { quoted: message }
       );
       return;
@@ -783,7 +835,7 @@ const autoReplyCommand = {
   }
 };
 
-// The plugin loader needs a listener object rather than a function export
+// Listener MUST be an object because the plugin loader ignores function exports.
 export const autoReplyListener = {
   command: '__autoreply_listener',
 
@@ -791,7 +843,10 @@ export const autoReplyListener = {
     try {
       await handleAutoReply(data);
     } catch (error) {
-      log('Listener error:', error?.stack || error?.message || error);
+      log(
+        'Listener error:',
+        error?.stack || error?.message || error
+      );
     }
   }
 };
