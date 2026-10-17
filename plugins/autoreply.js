@@ -1,23 +1,14 @@
 
-import { getDb, saveDb } from '../database/index.js';
+import { getDb, saveDb } from '../database/index.js'
 
-const PREFIX = () => process.env.PREFIX || '.';
-const GROQ_API_KEY = () => process.env.GROQ_API_KEY || '';
-const GROQ_MODEL = () =>
-  process.env.GROQ_MODEL || 'openai/gpt-oss-20b';
+const GROQ_API_KEY = process.env.GROQ_API_KEY
+const GROQ_MODEL =
+  process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
 
-const GROQ_URL =
-  'https://api.groq.com/openai/v1/chat/completions';
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions'
 
-const SETTINGS_FILE = 'ai-autoreply.json';
-const HISTORY_FILE = 'ai-autoreply-history.json';
-
-const ALLOWED_EMOJIS = [
-  '😭', '💋', '🌷', '🫂', '💗', '👀', '🌚', '🥲', '🙂',
-  '😕', '🙁', '🫪', '🫩', '🤧', '🫀', '👑', '💍', '🦋',
-  '🙈', '🐍', '🦢', '☘️', '🌝', '🌼', '🌸', '💐', '🌹',
-  '🔥', '🎲', '🎭', '💸', '🎀', '🪄', '🔖'
-];
+const SETTINGS_FILE = 'ai-autoreply.json'
+const HISTORY_FILE = 'ai-autoreply-history.json'
 
 const DEFAULT_SETTINGS = {
   enabled: true,
@@ -25,830 +16,884 @@ const DEFAULT_SETTINGS = {
   groups: true,
   groupMode: 'all',
   allowedGroups: [],
-  blockedGroups: [],
+  blockGroups: [],
   style: 'romantic',
   length: 'short',
   cooldown: 5,
-  historyPairs: 5,
+  historyPairs: 6,
   systemPrompt: ''
-};
-
-const settings = getDb(SETTINGS_FILE, DEFAULT_SETTINGS);
-const history = getDb(HISTORY_FILE, {});
-
-Object.assign(settings, {
-  ...DEFAULT_SETTINGS,
-  ...settings
-});
-
-if (!Array.isArray(settings.allowedGroups)) {
-  settings.allowedGroups = [];
 }
 
-if (!Array.isArray(settings.blockedGroups)) {
-  settings.blockedGroups = [];
+const ALLOWED_EMOJIS = [
+  '😭', '💋', '🌷', '🫂', '💗', '👀', '🌚', '🥲',
+  '🙂', '😕', '🙁', '🫪', '🫩', '🤧', '🫀', '👑',
+  '💍', '🦋', '🙈', '🐍', '🦢', '☘️', '🌝', '🌼',
+  '🌸', '💐', '🌹', '🔥', '🎲', '🎭', '💸', '🎀',
+  '🪄', '🔖'
+]
+
+const cooldowns = new Map()
+
+function defaultSettings() {
+  return {
+    ...DEFAULT_SETTINGS,
+    allowedGroups: [],
+    blockGroups: []
+  }
 }
 
-const lastReply = new Map();
-const pendingReplies = new Set();
+async function loadSettings() {
+  try {
+    const saved = await getDb(SETTINGS_FILE, {})
+    const settings = {
+      ...defaultSettings(),
+      ...(saved && typeof saved === 'object' ? saved : {})
+    }
 
-function log(...args) {
-  console.log('[AI AUTOREPLY]', ...args);
+    settings.allowedGroups = Array.isArray(settings.allowedGroups)
+      ? settings.allowedGroups
+      : []
+
+    settings.blockGroups = Array.isArray(settings.blockGroups)
+      ? settings.blockGroups
+      : []
+
+    return settings
+  } catch (error) {
+    console.error('[AI AUTOREPLY] Settings load failed:', error.message)
+    return defaultSettings()
+  }
 }
 
-function saveSettings() {
-  saveDb(SETTINGS_FILE, settings);
+async function saveSettings(settings) {
+  await saveDb(SETTINGS_FILE, settings)
 }
 
-function saveHistory() {
-  saveDb(HISTORY_FILE, history);
+async function loadHistory() {
+  try {
+    const saved = await getDb(HISTORY_FILE, {})
+    return saved && typeof saved === 'object' ? saved : {}
+  } catch (error) {
+    console.error('[AI AUTOREPLY] History load failed:', error.message)
+    return {}
+  }
 }
 
-function getChatJid(message) {
-  return message?.key?.remoteJid || '';
+async function saveHistory(history) {
+  await saveDb(HISTORY_FILE, history)
 }
 
-function getSenderJid(message) {
-  return (
-    message?.key?.participant ||
-    message?.participant ||
-    message?.key?.remoteJid ||
-    ''
-  );
-}
+/**
+ * Unwrap WhatsApp message containers.
+ */
+function unwrapMessage(message) {
+  let content = message?.message
+  let attempts = 0
 
-function getBotJid(sock) {
-  return (sock?.user?.id || '').split(':')[0].split('@')[0];
-}
+  while (content && attempts++ < 8) {
+    const nested =
+      content.ephemeralMessage?.message ||
+      content.viewOnceMessage?.message ||
+      content.viewOnceMessageV2?.message ||
+      content.viewOnceMessageV2Extension?.message ||
+      content.documentWithCaptionMessage?.message
 
-function isGroupJid(jid = '') {
-  return jid.endsWith('@g.us');
-}
-
-function cleanText(text = '') {
-  return String(text)
-    .replace(/\u0000/g, '')
-    .trim()
-    .slice(0, 4000);
-}
-
-function getStyleInstruction() {
-  const styles = {
-    natural: 'BE NATURAL BUT ALWAYS ROMANTIC AND FLIRTY',
-    friendly: 'BE SWEET FRIENDLY ROMANTIC AND PLAYFUL',
-    romantic: 'BE VERY ROMANTIC FLIRTY LOVING AND CUTE',
-    funny: 'BE ROMANTIC FLIRTY AND PLAYFULLY FUNNY'
-  };
-
-  return styles[settings.style] || styles.romantic;
-}
-
-function getSystemPrompt() {
-  return [
-    'YOU ARE A ROMANTIC WHATSAPP CHAT PARTNER',
-    'FOLLOW ALL OUTPUT RULES STRICTLY',
-    'REPLY ONLY IN ROMAN URDU',
-    'ROMAN URDU MEANS URDU WRITTEN USING ENGLISH LETTERS',
-    'NEVER WRITE URDU SCRIPT',
-    'NEVER REPLY IN ENGLISH',
-    'WRITE EVERY WORD IN CAPITAL LETTERS',
-    'BE ROMANTIC FLIRTY LOVING CUTE AND PLAYFUL',
-    'KEEP REPLIES SHORT AND NATURAL',
-    'RESPOND DIRECTLY TO THE LATEST MESSAGE',
-    'DO NOT USE FULL STOPS COMMAS QUESTION MARKS EXCLAMATION MARKS OR PUNCTUATION',
-    'DO NOT USE DECORATIVE SYMBOLS',
-    'DO NOT INCLUDE EMOJIS IN THE MESSAGE BODY',
-    'THE PLUGIN WILL ADD ONE ALLOWED EMOJI AT THE END',
-    'DO NOT ADD LABELS OR EXPLANATIONS',
-    'DO NOT OUTPUT THE REQUIRED MESSAGE FORMAT YOURSELF',
-    'OUTPUT ONLY THE MESSAGE TEXT',
-    settings.systemPrompt || '',
-    getStyleInstruction(),
-    settings.length === 'long'
-      ? 'USE A FEW SHORT SENTENCES'
-      : settings.length === 'medium'
-        ? 'USE ONE OR TWO SHORT SENTENCES'
-        : 'USE ONE SHORT SWEET SENTENCE',
-    'ONLY USE ROMAN URDU AND CAPITAL LETTERS'
-  ].filter(Boolean).join('\n');
-}
-
-function getHistoryKey(chatJid, senderJid) {
-  return `${chatJid}:${senderJid}`;
-}
-
-function trimHistory(items) {
-  const pairs = Math.max(
-    0,
-    Math.min(20, Number(settings.historyPairs) || 0)
-  );
-
-  if (pairs === 0) return [];
-
-  return items.slice(-(pairs * 2));
-}
-
-function sanitizeReply(text) {
-  return String(text || '')
-    .replace(/<think>[\s\S]*?<\/think>/gi, '')
-    .replace(/```[\s\S]*?```/g, '')
-    .trim()
-    .slice(0, 3000);
-}
-
-function formatReply(text) {
-  const original = sanitizeReply(text).toUpperCase();
-
-  if (!original) return '';
-
-  // Select one emoji from the allowed list, if the model returned one.
-  const emoji =
-    [...ALLOWED_EMOJIS]
-      .reverse()
-      .find(item => original.includes(item)) || '💋';
-
-  // Remove emojis and all punctuation or symbols from the message body.
-  const message = original
-    .replace(/\p{Extended_Pictographic}/gu, '')
-    .replace(/[\p{P}\p{S}]/gu, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  if (!message) return '';
-
-  // Required format: - _MESSAGE"_ EMOJI
-  return `- _${message}"_ ${emoji}`;
-}
-
-async function askGroq(chatJid, senderJid, incomingText) {
-  const apiKey = GROQ_API_KEY();
-
-  if (!apiKey) {
-    throw new Error(
-      'GROQ_API_KEY is missing from Heroku Config Vars or config.env'
-    );
+    if (!nested) break
+    content = nested
   }
 
-  const key = getHistoryKey(chatJid, senderJid);
-  const previous = Array.isArray(history[key])
-    ? history[key]
-    : [];
+  return content || {}
+}
 
-  const messages = [
-    {
-      role: 'system',
-      content: getSystemPrompt()
-    },
-    ...trimHistory(previous),
-    {
-      role: 'user',
-      content: incomingText
+/**
+ * Read the actual text or caption from an incoming WhatsApp message.
+ */
+function readMessageText(message, suppliedText) {
+  // Prefer the handler's extracted text when it is available.
+  if (typeof suppliedText === 'string' && suppliedText.trim()) {
+    return suppliedText.trim()
+  }
+
+  const content = unwrapMessage(message)
+
+  const candidates = [
+    content.conversation,
+    content.extendedTextMessage?.text,
+    content.imageMessage?.caption,
+    content.videoMessage?.caption,
+    content.documentMessage?.caption,
+    content.buttonsResponseMessage?.selectedDisplayText,
+    content.buttonsResponseMessage?.selectedButtonId,
+    content.templateButtonReplyMessage?.selectedDisplayText,
+    content.listResponseMessage?.title,
+    content.listResponseMessage?.description,
+    content.listResponseMessage?.singleSelectReply?.selectedRowId,
+    content.interactiveResponseMessage?.body?.text
+  ]
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim()
     }
-  ];
+  }
 
-  let lastError;
+  // Some interactive replies contain JSON in nativeFlowResponseMessage.
+  const nativeParams =
+    content.interactiveResponseMessage?.nativeFlowResponseMessage?.paramsJson
 
-  // Increase the completion budget if an attempt returns no usable text.
-  const tokenBudgets = [1024, 2048, 3072];
+  if (typeof nativeParams === 'string') {
+    try {
+      const parsed = JSON.parse(nativeParams)
+      const value =
+        parsed?.id ||
+        parsed?.text ||
+        parsed?.selected_id ||
+        parsed?.name
 
-  for (let attempt = 0; attempt < tokenBudgets.length; attempt++) {
-    let timeout;
+      if (typeof value === 'string' && value.trim()) {
+        return value.trim()
+      }
+    } catch {
+      // Ignore malformed interactive response JSON.
+    }
+  }
+
+  return ''
+}
+
+/**
+ * Select a suitable emoji based on the meaning and mood of the chat.
+ * Random choices are made only from the user's permitted emoji list.
+ */
+function chooseEmoji(input, reply) {
+  const text = `${input} ${reply}`.toLowerCase()
+
+  const has = (pattern) => pattern.test(text)
+
+  let choices
+
+  if (
+    has(/\b(udaas|sad|rona|ro raha|ro rahi|pareshan|tension|hurt|sorry|maaf|sorry|takleef|dard|cry|miss you)\b/)
+  ) {
+    choices = ['🫂', '💗', '🥲', '😭', '🌷']
+  } else if (
+    has(/\b(kiss|kissy|chumma|chum|lip|hot|sexy|flirt|flirting|seduce)\b/)
+  ) {
+    choices = ['💋', '🔥', '🙈', '🌚']
+  } else if (
+    has(/\b(yaad|yaad aa|miss|door|intezar|intezaar|tanha|tanhai|wapis|wapas)\b/)
+  ) {
+    choices = ['🫂', '💗', '🥲', '🌹', '💋']
+  } else if (
+    has(/\b(sharma|sharmao|sharmana|shy|blush|blushing|hayee|haye|uff|🙈)\b/)
+  ) {
+    choices = ['🙈', '🦋', '🌸', '💗']
+  } else if (
+    has(/\b(mazak|mazaq|tease|teasing|pagal|drama|chupke|secret|naughty)\b/)
+  ) {
+    choices = ['🌚', '👀', '🙈', '🎭']
+  } else if (
+    has(/\b(pyar|pyaar|mohabbat|ishq|jaan|meri jaan|love|beloved|dil|heart|beautiful|khubsurat|khoobsurat|cute|sweetheart|baby|babu|shona)\b/)
+  ) {
+    choices = ['💗', '💋', '🌹', '💍', '🫀', '🌷']
+  } else if (
+    has(/\b(khush|happy|hansi|muskur|smile|acha laga|accha laga|thank|shukriya|hehe|haha)\b/)
+  ) {
+    choices = ['🌸', '🌷', '💗', '🌝', '🦋']
+  } else if (
+    has(/\b(jalan|jealous|possessive|sirf meri|sirf mera|mine|meri ho|mere ho)\b/)
+  ) {
+    choices = ['👑', '💍', '🌚', '💗']
+  } else {
+    choices = ['💗', '🌷', '🦋', '🙈', '🌸', '💋', '🌝', '🫂']
+  }
+
+  return choices[Math.floor(Math.random() * choices.length)]
+}
+
+/**
+ * Enforce the requested message format:
+ * - _ROMAN URDU MESSAGE"_ EMOJI
+ *
+ * The body contains uppercase ASCII letters/numbers/spaces only.
+ */
+function formatReply(rawReply, incomingText) {
+  let body = String(rawReply || '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/^\s*(reply|response|roman urdu)\s*:\s*/i, '')
+    .replace(/^\s*[-*"'`]+/, '')
+    .replace(/["'`*_]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  // Remove punctuation, non-ASCII characters, and emojis from the body.
+  body = body
+    .replace(/[^A-Za-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase()
+
+  if (!body) return ''
+
+  // Keep the WhatsApp reply short and conversational.
+  if (body.length > 350) {
+    body = body.slice(0, 350).replace(/\s+\S*$/, '').trim()
+  }
+
+  const emoji = chooseEmoji(incomingText, body)
+
+  return `- _${body}"_ ${emoji}`
+}
+
+function getSystemPrompt(settings) {
+  const lengthInstruction =
+    settings.length === 'long'
+      ? 'Use two or three short conversational sentences when appropriate'
+      : settings.length === 'medium'
+        ? 'Usually use one short sentence and add a second only when natural'
+        : 'Usually reply with one short natural sentence'
+
+  const styleInstruction = {
+    romantic:
+      'Be romantic, caring, affectionate, emotionally warm, and sincere',
+    flirty:
+      'Be playfully flirty, charming, teasing, and romantic without sounding forced',
+    sweet:
+      'Be sweet, gentle, caring, soft, and affectionate',
+    natural:
+      'Sound like a real person texting someone they like, with subtle romance and natural emotion'
+  }[settings.style] || 'Be natural, romantic, caring, and affectionate'
+
+  return `
+You are a natural romantic chat partner texting on WhatsApp.
+
+UNDERSTAND THE MESSAGE FIRST
+- Read the latest incoming message carefully and understand its actual meaning.
+- Answer what the person really said, asked, or felt.
+- Use the recent conversation to understand context, references, questions, emotions, and ongoing topics.
+- Do not give an unrelated generic romantic line when the person asks a real question.
+- Do not repeat the same opening, phrase, compliment, or reply in every message.
+- Keep continuity with the conversation and respond like a human who is paying attention.
+- If the person is sad, comfort them. If they are teasing, tease back naturally. If they flirt, flirt back. If they express affection, respond affectionately.
+- If they ask something ordinary, answer it naturally while keeping a warm romantic tone where it fits.
+- Do not force romance into serious or practical questions.
+- Never mention being an AI, a model, or a chatbot.
+
+LANGUAGE AND FORMAT
+- Write ONLY in Roman Urdu, meaning Urdu written with English letters.
+- Use CAPITAL LETTERS ONLY.
+- Do not write Urdu script, Hindi script, or long English sentences.
+- Do not use punctuation, markdown, quotation marks, bullets, or emojis in your generated response.
+- Return ONLY the message body, not the required outer formatting.
+- The application will add the final formatting and select an emoji.
+- Never include explanations, labels, alternatives, or multiple draft replies.
+
+PERSONALITY
+- ${styleInstruction}.
+- ${lengthInstruction}.
+- Sound spontaneous, emotionally aware, warm, playful, and human.
+- Use everyday Roman Urdu phrases naturally rather than formal or literary Urdu.
+- Vary your wording according to the message and recent chat.
+- Do not overuse jaan, baby, meri jaan, or the same pet name.
+- Do not assume every message is a declaration of love.
+- Never invent facts about the person or claim they said something they did not say.
+- Keep the reply relevant to the latest message.
+
+${settings.systemPrompt ? `ADDITIONAL OWNER PREFERENCE:\n${settings.systemPrompt}` : ''}
+`.trim()
+}
+
+async function askGroq(messages) {
+  if (!GROQ_API_KEY) {
+    throw new Error('GROQ_API_KEY is missing from config.env')
+  }
+
+  let lastError
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), 30000)
 
     try {
-      const controller = new AbortController();
-
-      timeout = setTimeout(() => controller.abort(), 45000);
-
       const response = await fetch(GROQ_URL, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Bearer ${GROQ_API_KEY}`,
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          model: GROQ_MODEL(),
+          model: GROQ_MODEL,
           messages,
-          temperature: 0.8,
-          max_completion_tokens: tokenBudgets[attempt],
-          reasoning_effort: 'low'
+          temperature: attempt === 1 ? 0.85 : 0.95,
+          max_tokens: 300,
+          top_p: 0.9,
+          stream: false
         }),
         signal: controller.signal
-      });
+      })
 
-      const body = await response.json().catch(() => ({}));
+      const responseText = await response.text()
+      let result
+
+      try {
+        result = JSON.parse(responseText)
+      } catch {
+        throw new Error(
+          `Groq returned invalid JSON (HTTP ${response.status})`
+        )
+      }
 
       if (!response.ok) {
-        const error = new Error(
-          body?.error?.message ||
-          body?.message ||
-          `Groq returned HTTP ${response.status}`
-        );
+        const apiMessage =
+          result?.error?.message || `HTTP ${response.status}`
 
-        error.status = response.status;
-        throw error;
+        const error = new Error(`Groq API error: ${apiMessage}`)
+        error.status = response.status
+        throw error
       }
 
-      const choice = body?.choices?.[0];
-      const answer = choice?.message?.content;
+      const choice = result?.choices?.[0]
+      const content = choice?.message?.content
 
-      if (typeof answer !== 'string' || !answer.trim()) {
-        log('Empty completion details:', JSON.stringify({
-          model: body?.model,
-          finish_reason: choice?.finish_reason,
-          usage: body?.usage,
-          message: choice?.message
-            ? {
-                role: choice.message.role,
-                refusal: choice.message.refusal,
-                reasoningPresent: Boolean(choice.message.reasoning)
-              }
-            : null
-        }));
+      const reply = Array.isArray(content)
+        ? content
+            .map((part) => typeof part === 'string' ? part : part?.text || '')
+            .join(' ')
+            .trim()
+        : typeof content === 'string'
+          ? content.trim()
+          : ''
 
-        const error = new Error(
-          `Groq returned no reply text (finish_reason: ${choice?.finish_reason || 'unknown'})`
-        );
+      if (reply) return reply
 
-        error.emptyCompletion = true;
-        error.finishReason = choice?.finish_reason;
-        throw error;
-      }
+      console.warn('[AI AUTOREPLY] Empty Groq completion', {
+        model: GROQ_MODEL,
+        attempt,
+        finishReason: choice?.finish_reason,
+        usage: result?.usage
+      })
 
-      const reply = formatReply(answer);
-
-      if (!reply) {
-        const error = new Error(
-          'Groq returned text but formatting removed all message content'
-        );
-
-        error.emptyCompletion = true;
-        throw error;
-      }
-
-      // Store plain message text in history, not WhatsApp formatting.
-      const savedReply = reply
-        .replace(/^- _/, '')
-        .replace(/"_\s*[\s\S]*$/, '')
-        .trim();
-
-      history[key] = [
-        ...trimHistory(previous),
-        {
-          role: 'user',
-          content: incomingText
-        },
-        {
-          role: 'assistant',
-          content: savedReply
-        }
-      ].slice(-40);
-
-      saveHistory();
-
-      return reply;
+      lastError = new Error('Groq returned an empty response')
     } catch (error) {
-      lastError = error;
+      lastError = error
 
-      const status = error?.status;
-      const retryableStatus = [
-        429, 500, 502, 503, 504
-      ].includes(status);
+      console.error(
+        `[AI AUTOREPLY] Groq attempt ${attempt}/3 failed:`,
+        error.message
+      )
 
       const retryable =
-        error?.emptyCompletion ||
-        (!status && error?.name !== 'AbortError') ||
-        retryableStatus ||
-        error?.name === 'AbortError';
+        error.name === 'AbortError' ||
+        !error.status ||
+        [408, 429, 500, 502, 503, 504].includes(error.status)
 
-      log(
-        `Groq attempt ${attempt + 1}/${tokenBudgets.length} failed`,
-        status ? `HTTP ${status}` : '',
-        error?.message || error
-      );
-
-      if (!retryable || attempt === tokenBudgets.length - 1) {
-        break;
-      }
-
-      await new Promise(resolve =>
-        setTimeout(resolve, (attempt + 1) * 1000)
-      );
+      if (!retryable) break
     } finally {
-      clearTimeout(timeout);
+      clearTimeout(timeout)
+    }
+
+    if (attempt < 3) {
+      await new Promise((resolve) => setTimeout(resolve, attempt * 700))
     }
   }
 
-  throw lastError || new Error('Groq request failed');
+  throw lastError || new Error('Groq failed to generate a reply')
 }
 
-function groupAllowed(jid) {
-  if (!settings.groups) return false;
-  if (settings.blockedGroups.includes(jid)) return false;
-
-  if (settings.groupMode === 'allowlist') {
-    return settings.allowedGroups.includes(jid);
-  }
-
-  return true;
+async function sendMessage(sock, jid, message, text) {
+  await sock.sendMessage(
+    jid,
+    { text },
+    message ? { quoted: message } : {}
+  )
 }
 
-function shouldReply({ sock, message, text, isGroup, isStatus }) {
-  if (!settings.enabled) return false;
-  if (!sock || !message || !text) return false;
-  if (message.key?.fromMe) return false;
-  if (isStatus) return false;
-
-  const chatJid = getChatJid(message);
-
-  if (!chatJid || chatJid === 'status@broadcast') return false;
-  if (chatJid.endsWith('@broadcast')) return false;
-
-  const senderJid = getSenderJid(message);
-  const botJid = getBotJid(sock);
-  const senderNumber = senderJid.split('@')[0].split(':')[0];
-
-  if (botJid && senderNumber === botJid) return false;
-
-  const incomingText = cleanText(text);
-
-  if (!incomingText) return false;
-
-  // Ignore commands so the AI does not reply to bot commands.
-  if (incomingText.startsWith(PREFIX())) return false;
-
-  if (isGroup || isGroupJid(chatJid)) {
-    if (!groupAllowed(chatJid)) return false;
-  } else if (!settings.inbox) {
-    return false;
-  }
-
-  return true;
+function normalizeJid(jid) {
+  return typeof jid === 'string' ? jid.trim() : ''
 }
 
-async function handleAutoReply(data) {
-  const { sock, message, text, isGroup } = data;
+function getSenderJid(message, jid, isGroup) {
+  if (!isGroup) return jid
 
-  if (!shouldReply(data)) return;
-
-  const chatJid = getChatJid(message);
-  const senderJid = getSenderJid(message);
-  const incomingText = cleanText(text);
-  const key = `${chatJid}:${senderJid}`;
-
-  if (pendingReplies.has(key)) return;
-
-  const cooldownMs =
-    Math.max(0, Number(settings.cooldown) || 0) * 1000;
-
-  const last = lastReply.get(key) || 0;
-
-  if (cooldownMs && Date.now() - last < cooldownMs) {
-    return;
-  }
-
-  pendingReplies.add(key);
-
-  try {
-    log(
-      `Generating reply for ${chatJid} (${isGroup ? 'group' : 'inbox'})`
-    );
-
-    const reply = await askGroq(
-      chatJid,
-      senderJid,
-      incomingText
-    );
-
-    if (!reply) {
-      log('Reply skipped because the formatted message is empty');
-      return;
-    }
-
-    await sock.sendMessage(
-      chatJid,
-      { text: reply },
-      { quoted: message }
-    );
-
-    lastReply.set(key, Date.now());
-
-    log(`Reply sent to ${chatJid}`);
-  } catch (error) {
-    log(
-      'Reply failed:',
-      error?.stack || error?.message || error
-    );
-  } finally {
-    pendingReplies.delete(key);
-  }
+  return normalizeJid(
+    message?.key?.participant ||
+    message?.participant ||
+    jid
+  )
 }
 
-function parseOnOff(value) {
-  if (['on', 'yes', 'true', 'enable', 'enabled'].includes(value)) {
-    return true;
-  }
-
-  if (['off', 'no', 'false', 'disable', 'disabled'].includes(value)) {
-    return false;
-  }
-
-  return null;
+function isGroupJid(jid) {
+  return typeof jid === 'string' && jid.endsWith('@g.us')
 }
 
-function normalizeGroupInput(value, message) {
-  const raw = String(value || '').trim();
-
-  if (!raw || raw === 'here' || raw === 'this') {
-    const current = getChatJid(message);
-    return isGroupJid(current) ? current : '';
-  }
-
-  if (raw.endsWith('@g.us')) return raw;
-
-  const digits = raw.replace(/\D/g, '');
-  return digits ? `${digits}@g.us` : '';
+function getChatHistoryKey(jid, senderJid, isGroup) {
+  // Keep each group member's conversation context separate.
+  return isGroup ? `${jid}:${senderJid}` : jid
 }
 
-function helpText(prefix) {
-  return [
-    '*AI AUTOREPLY COMMANDS*',
-    '',
-    `${prefix}autoreply on`,
-    `${prefix}autoreply off`,
-    `${prefix}autoreply status`,
-    `${prefix}autoreply inbox on/off`,
-    `${prefix}autoreply groups on/off`,
-    `${prefix}autoreply group on/off`,
-    `${prefix}autoreply allow <group-jid>`,
-    `${prefix}autoreply deny <group-jid>`,
-    `${prefix}autoreply groupmode all/allowlist`,
-    `${prefix}autoreply style natural/friendly/romantic/funny`,
-    `${prefix}autoreply length short/medium/long`,
-    `${prefix}autoreply cooldown <seconds>`,
-    `${prefix}autoreply history <pairs>`,
-    `${prefix}autoreply prompt <text>`,
-    `${prefix}autoreply clear`,
-    `${prefix}autoreply reset`
-  ].join('\n');
+function hasCommandPrefix(text) {
+  const prefix = process.env.PREFIX || '.'
+  return Boolean(prefix && text.startsWith(prefix))
 }
 
-const autoReplyCommand = {
-  command: 'autoreply',
-  category: 'owner',
-  description: 'Configure romantic Roman Urdu AI auto-replies',
+function chooseHistory(history, key, pairs) {
+  const entries = Array.isArray(history[key]) ? history[key] : []
+  return entries.slice(-Math.max(1, pairs) * 2)
+}
 
-  async run({ sock, message, args = [], isOwner, isGroup }) {
-    const chatJid = getChatJid(message);
-
-    if (!isOwner) {
-      await sock.sendMessage(
-        chatJid,
-        {
-          text: 'ONLY THE BOT OWNER CAN CHANGE THESE SETTINGS'
-        },
-        { quoted: message }
-      );
-      return;
-    }
-
-    const action = String(args[0] || 'help').toLowerCase();
-    const value = String(args[1] || '').toLowerCase();
-    const prefix = PREFIX();
-
-    if (action === 'help') {
-      await sock.sendMessage(
-        chatJid,
-        { text: helpText(prefix) },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'on' || action === 'off') {
-      settings.enabled = action === 'on';
-      saveSettings();
-
-      await sock.sendMessage(
-        chatJid,
-        {
-          text: `AI AUTOREPLY ${settings.enabled ? 'ENABLED' : 'DISABLED'}`
-        },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'status') {
-      await sock.sendMessage(
-        chatJid,
-        {
-          text: [
-            '*AI AUTOREPLY STATUS*',
-            `ENABLED ${settings.enabled ? 'ON' : 'OFF'}`,
-            `INBOX ${settings.inbox ? 'ON' : 'OFF'}`,
-            `GROUPS ${settings.groups ? 'ON' : 'OFF'}`,
-            `GROUP MODE ${settings.groupMode}`,
-            `STYLE ${settings.style}`,
-            `LENGTH ${settings.length}`,
-            `COOLDOWN ${settings.cooldown} SECONDS`,
-            `HISTORY ${settings.historyPairs} PAIRS`,
-            `MODEL ${GROQ_MODEL()}`,
-            `API KEY ${GROQ_API_KEY() ? 'CONFIGURED' : 'MISSING'}`,
-            `CURRENT CHAT ${isGroup ? 'GROUP' : 'PRIVATE'}`
-          ].join('\n')
-        },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'inbox' || action === 'groups') {
-      const parsed = parseOnOff(value);
-
-      if (parsed === null) {
-        await sock.sendMessage(
-          chatJid,
-          { text: `USE ${prefix}autoreply ${action} on/off` },
-          { quoted: message }
-        );
-        return;
-      }
-
-      settings[action] = parsed;
-      saveSettings();
-
-      await sock.sendMessage(
-        chatJid,
-        {
-          text: `${action.toUpperCase()} ${parsed ? 'ON' : 'OFF'}`
-        },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'group') {
-      const groupAction = String(args[1] || '').toLowerCase();
-      const groupJid =
-        normalizeGroupInput(args[2], message) ||
-        (isGroupJid(chatJid) ? chatJid : '');
-
-      const parsed = parseOnOff(groupAction);
-
-      if (!groupJid || parsed === null) {
-        await sock.sendMessage(
-          chatJid,
-          {
-            text: `USE THIS COMMAND INSIDE A GROUP ${prefix}autoreply group on/off`
-          },
-          { quoted: message }
-        );
-        return;
-      }
-
-      if (parsed) {
-        settings.blockedGroups =
-          settings.blockedGroups.filter(id => id !== groupJid);
-
-        if (
-          settings.groupMode === 'allowlist' &&
-          !settings.allowedGroups.includes(groupJid)
-        ) {
-          settings.allowedGroups.push(groupJid);
-        }
-      } else if (!settings.blockedGroups.includes(groupJid)) {
-        settings.blockedGroups.push(groupJid);
-      }
-
-      saveSettings();
-
-      await sock.sendMessage(
-        chatJid,
-        {
-          text: `AUTOREPLY ${parsed ? 'ENABLED' : 'DISABLED'} FOR ${groupJid}`
-        },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'allow' || action === 'deny') {
-      const groupJid = normalizeGroupInput(args[1], message);
-
-      if (!groupJid) {
-        await sock.sendMessage(
-          chatJid,
-          { text: `USE ${prefix}autoreply ${action} <group-jid>` },
-          { quoted: message }
-        );
-        return;
-      }
-
-      if (action === 'allow') {
-        settings.blockedGroups =
-          settings.blockedGroups.filter(id => id !== groupJid);
-
-        if (!settings.allowedGroups.includes(groupJid)) {
-          settings.allowedGroups.push(groupJid);
-        }
-      } else {
-        settings.allowedGroups =
-          settings.allowedGroups.filter(id => id !== groupJid);
-
-        if (!settings.blockedGroups.includes(groupJid)) {
-          settings.blockedGroups.push(groupJid);
-        }
-      }
-
-      saveSettings();
-
-      await sock.sendMessage(
-        chatJid,
-        {
-          text: `GROUP ${action === 'allow' ? 'ALLOWED' : 'BLOCKED'}`
-        },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'groupmode') {
-      if (!['all', 'allowlist'].includes(value)) {
-        await sock.sendMessage(
-          chatJid,
-          { text: `USE ${prefix}autoreply groupmode all/allowlist` },
-          { quoted: message }
-        );
-        return;
-      }
-
-      settings.groupMode = value;
-      saveSettings();
-
-      await sock.sendMessage(
-        chatJid,
-        { text: `GROUP MODE ${value.toUpperCase()}` },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'style') {
-      if (!['natural', 'friendly', 'romantic', 'funny'].includes(value)) {
-        await sock.sendMessage(
-          chatJid,
-          {
-            text: `USE ${prefix}autoreply style natural/friendly/romantic/funny`
-          },
-          { quoted: message }
-        );
-        return;
-      }
-
-      settings.style = value;
-      saveSettings();
-
-      await sock.sendMessage(
-        chatJid,
-        { text: `STYLE SET TO ${value.toUpperCase()}` },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'length') {
-      if (!['short', 'medium', 'long'].includes(value)) {
-        await sock.sendMessage(
-          chatJid,
-          {
-            text: `USE ${prefix}autoreply length short/medium/long`
-          },
-          { quoted: message }
-        );
-        return;
-      }
-
-      settings.length = value;
-      saveSettings();
-
-      await sock.sendMessage(
-        chatJid,
-        { text: `LENGTH SET TO ${value.toUpperCase()}` },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'cooldown') {
-      const seconds = Number(args[1]);
-
-      if (!Number.isFinite(seconds) || seconds < 0 || seconds > 3600) {
-        await sock.sendMessage(
-          chatJid,
-          { text: `USE ${prefix}autoreply cooldown <0-3600>` },
-          { quoted: message }
-        );
-        return;
-      }
-
-      settings.cooldown = seconds;
-      saveSettings();
-
-      await sock.sendMessage(
-        chatJid,
-        { text: `COOLDOWN SET TO ${seconds} SECONDS` },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'history') {
-      const pairs = Number(args[1]);
-
-      if (!Number.isInteger(pairs) || pairs < 0 || pairs > 20) {
-        await sock.sendMessage(
-          chatJid,
-          { text: `USE ${prefix}autoreply history <0-20>` },
-          { quoted: message }
-        );
-        return;
-      }
-
-      settings.historyPairs = pairs;
-      saveSettings();
-
-      await sock.sendMessage(
-        chatJid,
-        { text: `HISTORY SET TO ${pairs} PAIRS` },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'prompt') {
-      settings.systemPrompt = args.slice(1).join(' ').slice(0, 1000);
-      saveSettings();
-
-      await sock.sendMessage(
-        chatJid,
-        {
-          text: settings.systemPrompt
-            ? 'CUSTOM PROMPT SAVED'
-            : 'CUSTOM PROMPT CLEARED'
-        },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'clear') {
-      const senderJid = getSenderJid(message);
-
-      delete history[getHistoryKey(chatJid, senderJid)];
-      saveHistory();
-
-      await sock.sendMessage(
-        chatJid,
-        { text: 'CONVERSATION HISTORY CLEARED' },
-        { quoted: message }
-      );
-      return;
-    }
-
-    if (action === 'reset') {
-      Object.assign(settings, structuredClone(DEFAULT_SETTINGS));
-      saveSettings();
-
-      await sock.sendMessage(
-        chatJid,
-        { text: 'SETTINGS RESET TO DEFAULTS' },
-        { quoted: message }
-      );
-      return;
-    }
-
-    await sock.sendMessage(
-      chatJid,
-      { text: helpText(prefix) },
-      { quoted: message }
-    );
-  }
-};
-
-// Listener MUST be an object because the plugin loader ignores function exports.
+/**
+ * Incoming-message listener.
+ * The plugin loader requires this to be an OBJECT with a run() method.
+ */
 export const autoReplyListener = {
   command: '__autoreply_listener',
 
-  async run(data) {
+  async run(data = {}) {
+    const {
+      sock,
+      message,
+      text: suppliedText,
+      isGroup: handlerSaysGroup,
+      isStatus
+    } = data
+
     try {
-      await handleAutoReply(data);
+      if (!sock || !message?.key) return
+      if (message.key.fromMe) return
+
+      const jid = normalizeJid(message.key.remoteJid)
+      if (!jid || jid === 'status@broadcast') return
+      if (isStatus) return
+
+      const isGroup = Boolean(handlerSaysGroup || isGroupJid(jid))
+      const settings = await loadSettings()
+
+      if (!settings.enabled) return
+
+      if (isGroup && !settings.groups) return
+      if (!isGroup && !settings.inbox) return
+
+      if (settings.blockGroups.includes(jid)) return
+
+      if (
+        isGroup &&
+        settings.groupMode === 'allow' &&
+        !settings.allowedGroups.includes(jid)
+      ) {
+        return
+      }
+
+      if (
+        isGroup &&
+        settings.groupMode === 'block' &&
+        settings.blockGroups.includes(jid)
+      ) {
+        return
+      }
+
+      const incomingText = readMessageText(message, suppliedText)
+      if (!incomingText) return
+
+      // Do not auto-reply to bot commands.
+      if (hasCommandPrefix(incomingText)) return
+
+      const senderJid = getSenderJid(message, jid, isGroup)
+      const historyKey = getChatHistoryKey(jid, senderJid, isGroup)
+      const cooldownKey = historyKey
+      const now = Date.now()
+      const cooldownMs = Math.max(0, Number(settings.cooldown) || 0) * 1000
+      const previousReplyAt = cooldowns.get(cooldownKey) || 0
+
+      if (now - previousReplyAt < cooldownMs) return
+
+      // Reserve this cooldown before the API request to avoid parallel replies.
+      cooldowns.set(cooldownKey, now)
+
+      const history = await loadHistory()
+      const recentMessages = chooseHistory(
+        history,
+        historyKey,
+        Number(settings.historyPairs) || 6
+      )
+
+      const latestUserMessage = isGroup
+        ? `GROUP MEMBER MESSAGE: ${incomingText}`
+        : incomingText
+
+      const messages = [
+        {
+          role: 'system',
+          content: getSystemPrompt(settings)
+        },
+        ...recentMessages.map((item) => ({
+          role: item.role,
+          content: item.content
+        })),
+        {
+          role: 'user',
+          content: latestUserMessage
+        }
+      ]
+
+      const rawReply = await askGroq(messages)
+      const formattedReply = formatReply(rawReply, incomingText)
+
+      if (!formattedReply) {
+        console.warn('[AI AUTOREPLY] Reply was empty after formatting')
+        return
+      }
+
+      await sendMessage(sock, jid, formattedReply, message)
+
+      // Store the real incoming message and the generated answer.
+      const plainReply = formattedReply
+        .replace(/^- _/, '')
+        .replace(/"_\s*\S+\s*$/, '')
+        .trim()
+
+      const updatedHistory = [
+        ...recentMessages,
+        {
+          role: 'user',
+          content: latestUserMessage
+        },
+        {
+          role: 'assistant',
+          content: plainReply
+        }
+      ].slice(-Math.max(1, Number(settings.historyPairs) || 6) * 2)
+
+      history[historyKey] = updatedHistory
+      await saveHistory(history)
     } catch (error) {
-      log(
-        'Listener error:',
-        error?.stack || error?.message || error
-      );
+      console.error('[AI AUTOREPLY] Listener failed:', error.message)
     }
   }
-};
+}
 
-export default autoReplyCommand;
+/**
+ * Owner commands:
+ * !autoreply on
+ * !autoreply off
+ * !autoreply status
+ * !autoreply inbox on/off
+ * !autoreply groups on/off
+ * !autoreply mode all/allow/block
+ * !autoreply allow
+ * !autoreply block
+ * !autoreply unallow
+ * !autoreply unblock
+ * !autoreply style romantic/flirty/sweet/natural
+ * !autoreply length short/medium/long
+ * !autoreply cooldown 5
+ * !autoreply history 6
+ * !autoreply prompt your custom preference
+ * !autoreply clear
+ * !autoreply reset
+ */
+const autoReplyCommand = {
+  command: 'autoreply',
+  category: 'ai',
+  description: 'Control the AI romantic auto-reply',
+
+  async run({
+    sock,
+    message,
+    args = [],
+    text = '',
+    isOwner,
+    isGroup
+  }) {
+    const jid = normalizeJid(message?.key?.remoteJid)
+
+    if (!jid) return
+
+    if (!isOwner) {
+      await sendMessage(
+        sock,
+        jid,
+        message,
+        'ONLY THE BOT OWNER CAN CHANGE AI AUTOREPLY SETTINGS'
+      )
+      return
+    }
+
+    const settings = await loadSettings()
+    const sub = String(args[0] || 'status').toLowerCase()
+    const value = String(args[1] || '').toLowerCase()
+    const groupJid = isGroup ? jid : ''
+
+    const respond = (reply) => sendMessage(sock, jid, message, reply)
+
+    switch (sub) {
+      case 'on':
+      case 'enable':
+      case 'start': {
+        settings.enabled = true
+        await saveSettings(settings)
+        await respond('AI AUTOREPLY IS NOW ON')
+        break
+      }
+
+      case 'off':
+      case 'disable':
+      case 'stop': {
+        settings.enabled = false
+        await saveSettings(settings)
+        await respond('AI AUTOREPLY IS NOW OFF')
+        break
+      }
+
+      case 'status': {
+        await respond(
+          [
+            'AI AUTOREPLY STATUS',
+            `ENABLED ${settings.enabled ? 'ON' : 'OFF'}`,
+            `INBOX ${settings.inbox ? 'ON' : 'OFF'}`,
+            `GROUPS ${settings.groups ? 'ON' : 'OFF'}`,
+            `GROUP MODE ${settings.groupMode.toUpperCase()}`,
+            `STYLE ${settings.style.toUpperCase()}`,
+            `LENGTH ${settings.length.toUpperCase()}`,
+            `COOLDOWN ${settings.cooldown} SECONDS`,
+            `HISTORY ${settings.historyPairs} PAIRS`,
+            `MODEL ${GROQ_MODEL}`
+          ].join('\n')
+        )
+        break
+      }
+
+      case 'inbox': {
+        if (!['on', 'off'].includes(value)) {
+          await respond('USE AUTOREPLY INBOX ON OR AUTOREPLY INBOX OFF')
+          break
+        }
+
+        settings.inbox = value === 'on'
+        await saveSettings(settings)
+        await respond(`PRIVATE CHAT AUTOREPLY ${value.toUpperCase()}`)
+        break
+      }
+
+      case 'groups': {
+        if (!['on', 'off'].includes(value)) {
+          await respond('USE AUTOREPLY GROUPS ON OR AUTOREPLY GROUPS OFF')
+          break
+        }
+
+        settings.groups = value === 'on'
+        await saveSettings(settings)
+        await respond(`GROUP AUTOREPLY ${value.toUpperCase()}`)
+        break
+      }
+
+      case 'mode': {
+        if (!['all', 'allow', 'block'].includes(value)) {
+          await respond('GROUP MODE OPTIONS ARE ALL ALLOW OR BLOCK')
+          break
+        }
+
+        settings.groupMode = value
+        await saveSettings(settings)
+        await respond(`GROUP MODE SET TO ${value.toUpperCase()}`)
+        break
+      }
+
+      case 'allow': {
+        if (!groupJid) {
+          await respond('USE THIS COMMAND INSIDE THE GROUP YOU WANT TO ALLOW')
+          break
+        }
+
+        settings.allowedGroups = [
+          ...new Set([...settings.allowedGroups, groupJid])
+        ]
+        settings.blockGroups = settings.blockGroups.filter(
+          (item) => item !== groupJid
+        )
+
+        await saveSettings(settings)
+        await respond('THIS GROUP IS NOW ALLOWED')
+        break
+      }
+
+      case 'block': {
+        if (!groupJid) {
+          await respond('USE THIS COMMAND INSIDE THE GROUP YOU WANT TO BLOCK')
+          break
+        }
+
+        settings.blockGroups = [
+          ...new Set([...settings.blockGroups, groupJid])
+        ]
+        settings.allowedGroups = settings.allowedGroups.filter(
+          (item) => item !== groupJid
+        )
+
+        await saveSettings(settings)
+        await respond('THIS GROUP IS NOW BLOCKED')
+        break
+      }
+
+      case 'unallow': {
+        if (!groupJid) {
+          await respond('USE THIS COMMAND INSIDE THE GROUP')
+          break
+        }
+
+        settings.allowedGroups = settings.allowedGroups.filter(
+          (item) => item !== groupJid
+        )
+
+        await saveSettings(settings)
+        await respond('THIS GROUP WAS REMOVED FROM THE ALLOW LIST')
+        break
+      }
+
+      case 'unblock': {
+        if (!groupJid) {
+          await respond('USE THIS COMMAND INSIDE THE GROUP')
+          break
+        }
+
+        settings.blockGroups = settings.blockGroups.filter(
+          (item) => item !== groupJid
+        )
+
+        await saveSettings(settings)
+        await respond('THIS GROUP WAS REMOVED FROM THE BLOCK LIST')
+        break
+      }
+
+      case 'style': {
+        if (!['romantic', 'flirty', 'sweet', 'natural'].includes(value)) {
+          await respond('STYLES ARE ROMANTIC FLIRTY SWEET OR NATURAL')
+          break
+        }
+
+        settings.style = value
+        await saveSettings(settings)
+        await respond(`ROMANTIC CHAT STYLE SET TO ${value.toUpperCase()}`)
+        break
+      }
+
+      case 'length': {
+        if (!['short', 'medium', 'long'].includes(value)) {
+          await respond('REPLY LENGTH OPTIONS ARE SHORT MEDIUM OR LONG')
+          break
+        }
+
+        settings.length = value
+        await saveSettings(settings)
+        await respond(`REPLY LENGTH SET TO ${value.toUpperCase()}`)
+        break
+      }
+
+      case 'cooldown': {
+        const seconds = Number(args[1])
+
+        if (!Number.isFinite(seconds) || seconds < 0 || seconds > 3600) {
+          await respond('COOLDOWN MUST BE BETWEEN 0 AND 3600 SECONDS')
+          break
+        }
+
+        settings.cooldown = seconds
+        await saveSettings(settings)
+        await respond(`COOLDOWN SET TO ${seconds} SECONDS`)
+        break
+      }
+
+      case 'history': {
+        const pairs = Number(args[1])
+
+        if (!Number.isInteger(pairs) || pairs < 1 || pairs > 20) {
+          await respond('HISTORY MUST BE BETWEEN 1 AND 20 PAIRS')
+          break
+        }
+
+        settings.historyPairs = pairs
+        await saveSettings(settings)
+        await respond(`CONVERSATION HISTORY SET TO ${pairs} PAIRS`)
+        break
+      }
+
+      case 'prompt': {
+        const customPrompt = String(text || args.slice(1).join(' ')).trim()
+          .replace(/^prompt\s*/i, '')
+          .trim()
+
+        if (!customPrompt) {
+          await respond(
+            'ADD YOUR PREFERENCE AFTER AUTOREPLY PROMPT OR USE AUTOREPLY PROMPT CLEAR'
+          )
+          break
+        }
+
+        if (customPrompt.toLowerCase() === 'clear') {
+          settings.systemPrompt = ''
+          await saveSettings(settings)
+          await respond('CUSTOM AI PROMPT CLEARED')
+          break
+        }
+
+        settings.systemPrompt = customPrompt.slice(0, 1500)
+        await saveSettings(settings)
+        await respond('CUSTOM AI PROMPT UPDATED')
+        break
+      }
+
+      case 'clear': {
+        const history = await loadHistory()
+
+        if (isGroup) {
+          for (const key of Object.keys(history)) {
+            if (key.startsWith(`${jid}:`)) {
+              delete history[key]
+            }
+          }
+        } else {
+          delete history[jid]
+        }
+
+        await saveHistory(history)
+        await respond('RECENT CONVERSATION HISTORY CLEARED')
+        break
+      }
+
+      case 'reset': {
+        const fresh = defaultSettings()
+        await saveSettings(fresh)
+        await respond('AI AUTOREPLY SETTINGS RESET TO DEFAULTS')
+        break
+      }
+
+      default: {
+        await respond(
+          [
+            'AI AUTOREPLY COMMANDS',
+            '!autoreply on',
+            '!autoreply off',
+            '!autoreply status',
+            '!autoreply inbox on/off',
+            '!autoreply groups on/off',
+            '!autoreply mode all/allow/block',
+            '!autoreply allow',
+            '!autoreply block',
+            '!autoreply unallow',
+            '!autoreply unblock',
+            '!autoreply style romantic/flirty/sweet/natural',
+            '!autoreply length short/medium/long',
+            '!autoreply cooldown 5',
+            '!autoreply history 6',
+            '!autoreply prompt YOUR PREFERENCE',
+            '!autoreply prompt clear',
+            '!autoreply clear',
+            '!autoreply reset'
+          ].join('\n')
+        )
+      }
+    }
+  }
+}
+
+export default autoReplyCommand
