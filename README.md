@@ -6,19 +6,19 @@
 ----------
 
 <p align="center">
-<a href='https://pair-web-3e08f4e68faf.herokuapp.com/' target="_blank"><img alt='Get Pairing Code' src='https://img.shields.io/badge/Get%20Pairing%20Code-B700FB?style=for-the-badge&logo=codefactor&logoColor=white'/></a>
+<a href='https://raza-md-web-dfda9dd453f1.herokuapp.com/' target="_blank"><img alt='session id + deploy'src='https://img.shields.io/badge/Get%20Pairing%20Code-B700FB?style=for-the-badge&logo=codefactor&logoColor=white'/></a>
  
 ----------
 
 ----------
 
 <p align="center">
-<a href='https://pair-web-3e08f4e68faf.herokuapp.com/' target="_blank"><img alt='Get Pairing Code' src='https://img.shields.io/badge/Get%20Pairing%20Code-000000?style=for-the-badge&logo=codefactor&logoColor=white'/></a>  
+<a href='https://raza-md-web-dfda9dd453f1.herokuapp.com/'target="_blank"><img alt='Session id + deploy'src='https://img.shields.io/badge/Get%20Pairing%20Code-000000?style=for-the-badge&logo=codefactor&logoColor=white'/></a>  
 </p>
  
 ----------
 
-### [![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/LEGEND-RAZA/RAZA-MD)
+### [![Manual Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/LEGEND-RAZA/RAZA-MD)
 
 <img src="https://i.imgur.com/dBaSKWF.gif" height="90" width="100%">
 
