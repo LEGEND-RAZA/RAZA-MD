@@ -250,8 +250,6 @@ async function sendActiveMessage() {
 ┃ 𝐒ᴛᴀᴛᴜs : 𝐎ɴʟɪɴᴇ ✅
 ┃ 𝐏ʀᴇғɪx : ${process.env.PREFIX || '.'}
 ┃ 𝐂ᴏᴍᴍᴀɴᴅs : ${plugins.size}
-┃ 𝐌ᴇssᴀɢᴇ 𝐋ɪsᴛᴇɴᴇʀs : ${messageListeners.length}
-┃ 𝐆ʀᴏᴜᴘ 𝐋ɪsᴛᴇɴᴇʀs : ${groupListeners.length}
 ┃
 ╰━━━━━━━━━━━━━━━━━━━━┈⊷
 
