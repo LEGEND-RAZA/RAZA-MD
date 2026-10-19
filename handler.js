@@ -507,13 +507,8 @@ export async function handleMessages(
           .message
           ?.groupStatusMessageV2
 
-      if (
-        rawJid ===
-          'status@broadcast' &&
-        !isGroupStatusPost
-      ) {
-        continue
-      }
+      const isStatus =
+        rawJid === 'status@broadcast'
 
       const normalizedRemoteJid =
         normalizeJid(
@@ -542,7 +537,12 @@ export async function handleMessages(
 
       /*
        * ==============================
-       * RUN LISTENERS WITHOUT BLOCKING
+       * RUN LISTENERS FIRST — before
+       * any message filtering.
+       * Each listener self-filters
+       * (e.g. statusViewListener only
+       * acts on status@broadcast), so
+       * passing every message is safe.
        * ==============================
        */
 
@@ -555,18 +555,19 @@ export async function handleMessages(
           isOwner,
           isGroup:
             isGroupChat,
-          isStatus:
-            isGroupStatusPost
+          isStatus
         }
       )
 
       /*
        * ==============================
-       * STATUS POSTS
+       * STATUS POSTS — command path only.
+       * Listeners above already ran.
        * ==============================
        */
 
       if (
+        isStatus ||
         isGroupStatusPost
       ) {
         continue
