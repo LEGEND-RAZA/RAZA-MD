@@ -455,7 +455,8 @@ export async function handleMessages(
   plugins,
   messageListeners
 ) {
-  // ─── CHANGED: allow 'append' (Baileys 7.x delivers statuses here on reconnect) ───
+  // Allow both 'notify' and 'append' (Baileys 7.x delivers queued
+  // statuses via 'append' after a reconnect).
   if (
     update.type !== 'notify' &&
     update.type !== 'append'
@@ -493,9 +494,22 @@ export async function handleMessages(
         message.key?.remoteJid ||
         ''
 
+      /*
+       * ─── NEW: skip autoread for view-once messages ───
+       * The autovv listener needs to download the media BEFORE a
+       * read receipt is sent — the receipt invalidates the
+       * view-once media key on WA's server side.
+       */
+      const isViewOnce = !!(
+        message.message?.viewOnceMessage ||
+        message.message?.viewOnceMessageV2 ||
+        message.message?.viewOnceMessageV2Extension
+      )
+
       if (
         getAutoRead() &&
-        message.key?.id
+        message.key?.id &&
+        !isViewOnce
       ) {
         Promise.resolve(
           sock.readMessages([
@@ -541,8 +555,8 @@ export async function handleMessages(
        * ==============================
        * RUN LISTENERS FIRST — before
        * any message filtering, so
-       * statusview (and friends) see
-       * every status@broadcast.
+       * statusview / autovv / antidelete
+       * see every message.
        * ==============================
        */
 
