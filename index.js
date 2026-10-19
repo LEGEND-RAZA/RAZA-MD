@@ -73,6 +73,9 @@ function validCredsAt(file) {
  * ==========================
  * SESSION RESTORE
  * ==========================
+ * Runs only when there is no valid local session (fresh Heroku dyno),
+ * so a reconnect never overwrites newer keys with the old snapshot.
+ * Returns 'ok', 'retry' (server/network problem) or 'invalid' (bad SESSION_ID).
  */
 async function restoreRemoteSession(force = false) {
   if (!force && validCredsAt(CREDS_FILE)) {
@@ -105,6 +108,7 @@ async function restoreRemoteSession(force = false) {
         throw new Error(data.error || `HTTP ${response.status}`)
       }
 
+      // Download into a temp folder first, so a bad download never destroys a working session.
       const tmp = `${SESSION_DIR}.tmp`
       fs.rmSync(tmp, { recursive: true, force: true })
       fs.mkdirSync(tmp, { recursive: true })
@@ -141,6 +145,8 @@ async function restoreRemoteSession(force = false) {
  * ==========================
  * SESSION SYNC (write-back)
  * ==========================
+ * Heroku wipes the disk on every restart. Uploading the latest keys means
+ * the next restart resumes from the newest state instead of the first snapshot.
  */
 function signature() {
   try {
@@ -250,6 +256,8 @@ async function sendActiveMessage() {
 ┃ 𝐒ᴛᴀᴛᴜs : 𝐎ɴʟɪɴᴇ ✅
 ┃ 𝐏ʀᴇғɪx : ${process.env.PREFIX || '.'}
 ┃ 𝐂ᴏᴍᴍᴀɴᴅs : ${plugins.size}
+┃ 𝐌ᴇssᴀɢᴇ 𝐋ɪsᴛᴇɴᴇʀs : ${messageListeners.length}
+┃ 𝐆ʀᴏᴜᴘ 𝐋ɪsᴛᴇɴᴇʀs : ${groupListeners.length}
 ┃
 ╰━━━━━━━━━━━━━━━━━━━━┈⊷
 
@@ -311,40 +319,12 @@ async function connect() {
       logger,
       browser: Browsers.ubuntu('Chrome'),
       printQRInTerminal: false,
-      // ─── CHANGED: was false — needed for status@broadcast delivery in 7.x ───
       markOnlineOnConnect: true,
-      // ─── CHANGED: was false — populates LID/PN mapping required to address status receipts ───
       syncFullHistory: true,
       generateHighQualityLinkPreview: false
     })
 
     sock.ev.on('creds.update', saveCreds)
-
-    /*
-     * ─── ADDED: raw status logger — safe to remove once status-view works ───
-     * Fires for every messages.upsert that contains a status@broadcast message,
-     * regardless of update.type. Useful for confirming delivery + participant JID.
-     */
-    sock.ev.on('messages.upsert', event => {
-      try {
-        const statuses = (event.messages || []).filter(
-          m => m.key?.remoteJid === 'status@broadcast'
-        )
-        if (statuses.length) {
-          console.log('[RAW STATUS]', {
-            type: event.type,
-            count: statuses.length,
-            keys: statuses.map(m => ({
-              id: m.key.id,
-              participant: m.key.participant,
-              participantAlt: m.key.participantAlt,
-              remoteJidAlt: m.key.remoteJidAlt,
-              fromMe: m.key.fromMe
-            }))
-          })
-        }
-      } catch {}
-    })
 
     sock.ev.on('messages.upsert', async event => {
       try {
