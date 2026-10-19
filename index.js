@@ -16,7 +16,8 @@ import {
   loadPlugins,
   plugins,
   messageListeners,
-  groupListeners
+  groupListeners,
+  setupHooks
 } from './lib/plugin-loader.js'
 
 import {
@@ -69,14 +70,6 @@ function validCredsAt(file) {
   }
 }
 
-/*
- * ==========================
- * SESSION RESTORE
- * ==========================
- * Runs only when there is no valid local session (fresh Heroku dyno),
- * so a reconnect never overwrites newer keys with the old snapshot.
- * Returns 'ok', 'retry' (server/network problem) or 'invalid' (bad SESSION_ID).
- */
 async function restoreRemoteSession(force = false) {
   if (!force && validCredsAt(CREDS_FILE)) {
     console.log('[SESSION] Using local session.')
@@ -108,7 +101,6 @@ async function restoreRemoteSession(force = false) {
         throw new Error(data.error || `HTTP ${response.status}`)
       }
 
-      // Download into a temp folder first, so a bad download never destroys a working session.
       const tmp = `${SESSION_DIR}.tmp`
       fs.rmSync(tmp, { recursive: true, force: true })
       fs.mkdirSync(tmp, { recursive: true })
@@ -141,13 +133,6 @@ async function restoreRemoteSession(force = false) {
   return outcome
 }
 
-/*
- * ==========================
- * SESSION SYNC (write-back)
- * ==========================
- * Heroku wipes the disk on every restart. Uploading the latest keys means
- * the next restart resumes from the newest state instead of the first snapshot.
- */
 function signature() {
   try {
     return fs
@@ -193,7 +178,8 @@ async function pushSession() {
       syncOff = true
       console.error('[SESSION] Server does not accept session updates. Sync disabled.')
     } else {
-      console.error(`[SESSION] Sync failed: HTTP ${response.status}`)
+      const body = await response.text().catch(() => '')
+      console.error(`[SESSION] Sync failed: HTTP ${response.status} — ${body.slice(0, 200)}`)
     }
   } catch (error) {
     console.error('[SESSION] Sync error:', error?.message || error)
@@ -209,11 +195,6 @@ function startSessionSync() {
   setInterval(pushSession, SYNC_MINUTES * 60 * 1000).unref()
 }
 
-/*
- * ==========================
- * SUPPORT + ACTIVE MESSAGE
- * ==========================
- */
 async function startSupport(sock) {
   if (supportDone) return
   supportDone = true
@@ -241,7 +222,6 @@ async function sendActiveMessage() {
 
   try {
     const botJid = jidNormalizedUser(sock.user.id)
-
     if (!botJid) {
       console.error('[WA] Could not determine bot JID.')
       return
@@ -256,6 +236,8 @@ async function sendActiveMessage() {
 ┃ 𝐒ᴛᴀᴛᴜs : 𝐎ɴʟɪɴᴇ ✅
 ┃ 𝐏ʀᴇғɪx : ${process.env.PREFIX || '.'}
 ┃ 𝐂ᴏᴍᴍᴀɴᴅs : ${plugins.size}
+┃ 𝐌ᴇssᴀɢᴇ 𝐋ɪsᴛᴇɴᴇʀs : ${messageListeners.length}
+┃ 𝐆ʀᴏᴜᴘ 𝐋ɪsᴛᴇɴᴇʀs : ${groupListeners.length}
 ┃
 ╰━━━━━━━━━━━━━━━━━━━━┈⊷
 
@@ -267,7 +249,6 @@ async function sendActiveMessage() {
 `.trim()
 
     await sock.sendMessage(botJid, { text: activeMessage })
-
     activeMessageSent = true
     console.log(`[WA] Active message sent to bot: ${botJid}`)
   } catch (error) {
@@ -275,11 +256,6 @@ async function sendActiveMessage() {
   }
 }
 
-/*
- * ==========================
- * CONNECTION
- * ==========================
- */
 async function connect() {
   if (reconnecting) return
   reconnecting = true
@@ -292,17 +268,14 @@ async function connect() {
 
     if (restored !== 'ok') {
       reconnecting = false
-
       if (restored === 'invalid') {
         console.error('[SESSION] No valid session. Bot not started.')
         return
       }
-
       if (++sessionRetries > 5) {
         console.error('[SESSION] Giving up after repeated download failures.')
         return
       }
-
       console.log('[SESSION] Retrying in 60 seconds...')
       await sleep(60000)
       return connect()
@@ -323,6 +296,17 @@ async function connect() {
     })
 
     sock.ev.on('creds.update', saveCreds)
+
+    /*
+     * ─── NEW: run plugin setup hooks (anti-delete registers messages.update here) ───
+     */
+    for (const hook of setupHooks) {
+      try {
+        await hook(sock)
+      } catch (e) {
+        console.error(`[SETUP] Hook ${hook.name || '?'} failed:`, e?.message || e)
+      }
+    }
 
     sock.ev.on('messages.upsert', async event => {
       try {
@@ -359,6 +343,7 @@ async function connect() {
         console.log(`[WA] Plugins: ${plugins.size}`)
         console.log(`[WA] Message listeners: ${messageListeners.length}`)
         console.log(`[WA] Group listeners: ${groupListeners.length}`)
+        console.log(`[WA] Setup hooks: ${setupHooks.length}`)
 
         reconnecting = false
         badSessionRetries = 0
@@ -395,42 +380,33 @@ async function connect() {
 
       if (connection === 'close') {
         const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode
-
         console.error(`[WA] Connection closed. Code: ${statusCode || 'unknown'}`)
-
         reconnecting = false
 
         if (statusCode === DisconnectReason.loggedOut) {
           console.error('[WA] Session logged out.')
-
-          try {
-            fs.rmSync(SESSION_DIR, { recursive: true, force: true })
-          } catch {}
-
+          try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }) } catch {}
           console.error('[WA] Session directory removed. Generate a new session.')
           return
         }
 
         if (statusCode === DisconnectReason.badSession) {
           console.error('[WA] Bad session detected.')
-
           if (SESSION_ID && ++badSessionRetries <= 2) {
             console.error('[WA] Downloading a fresh copy from the server...')
             forceRestore = true
             await sleep(3000)
             return connect()
           }
-
           console.error('[WA] The stored session is invalid or corrupted. Generate a new session.')
           return
         }
 
         if (statusCode === DisconnectReason.connectionReplaced) {
           if (++replacedRetries > 3) {
-            console.error('[WA] This session is in use by another instance. Stopped. Run each SESSION_ID only once.')
+            console.error('[WA] This session is in use by another instance. Stopped.')
             return
           }
-
           console.error('[WA] Connection replaced by another instance. Retrying in 30 seconds...')
           await sleep(30000)
           return connect()
@@ -438,25 +414,17 @@ async function connect() {
 
         console.log('[WA] Reconnecting in 5 seconds...')
         await sleep(statusCode === DisconnectReason.restartRequired ? 1000 : 5000)
-
-        try {
-          await connect()
-        } catch (error) {
+        try { await connect() } catch (error) {
           console.error('[WA] Reconnect error:', error?.message || error)
         }
       }
     })
   } catch (error) {
     reconnecting = false
-
     console.error('[WA] Connection error:', error?.stack || error?.message || error)
     console.log('[WA] Retrying in 5 seconds...')
-
     await sleep(5000)
-
-    try {
-      await connect()
-    } catch (retryError) {
+    try { await connect() } catch (retryError) {
       console.error('[WA] Retry error:', retryError?.message || retryError)
     }
   }
@@ -479,6 +447,7 @@ async function start() {
     console.log(`[PLUGIN] Loaded ${plugins.size} command(s).`)
     console.log(`[PLUGIN] Loaded ${messageListeners.length} message listener(s).`)
     console.log(`[PLUGIN] Loaded ${groupListeners.length} group listener(s).`)
+    console.log(`[PLUGIN] Loaded ${setupHooks.length} setup hook(s).`)
   } catch (error) {
     console.error('[PLUGIN] Loader error:', error?.stack || error?.message || error)
   }
@@ -496,15 +465,8 @@ process.on('unhandledRejection', error => {
 
 async function shutdown(signal) {
   console.log(`[PROCESS] ${signal} received.`)
-
-  try {
-    await Promise.race([pushSession(), sleep(8000)])
-  } catch {}
-
-  try {
-    sock?.end(new Error('Process terminated'))
-  } catch {}
-
+  try { await Promise.race([pushSession(), sleep(8000)]) } catch {}
+  try { sock?.end(new Error('Process terminated')) } catch {}
   process.exit(0)
 }
 
