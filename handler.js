@@ -455,8 +455,10 @@ export async function handleMessages(
   plugins,
   messageListeners
 ) {
+  // ─── CHANGED: allow 'append' (Baileys 7.x delivers statuses here on reconnect) ───
   if (
-    update.type !== 'notify'
+    update.type !== 'notify' &&
+    update.type !== 'append'
   ) {
     return
   }
@@ -538,11 +540,9 @@ export async function handleMessages(
       /*
        * ==============================
        * RUN LISTENERS FIRST — before
-       * any message filtering.
-       * Each listener self-filters
-       * (e.g. statusViewListener only
-       * acts on status@broadcast), so
-       * passing every message is safe.
+       * any message filtering, so
+       * statusview (and friends) see
+       * every status@broadcast.
        * ==============================
        */
 
