@@ -29,17 +29,6 @@ function getPrefix() {
  * ==============================
  * AUTO-VIEW LISTENER (Baileys 7.x)
  * ==============================
- *
- * Baileys 7.x uses LID JIDs for Signal sessions. A status message may
- * carry the poster's identity in any of:
- *   key.participant       (@lid OR @s.whatsapp.net)
- *   key.participantAlt    (the matching PN, when participant is a LID)
- *   message.participant   (older builds)
- *   message.participantAlt
- *
- * We try them in order and use whichever looks like a real JID.
- * sendReceipt is the primary path — it is the only reliable way to
- * deliver a status read-receipt on 7.x.
  */
 
 export const statusViewListener = {
@@ -59,9 +48,6 @@ export const statusViewListener = {
       const settings = await loadSettings()
       if (!settings.enabled) return
 
-      /*
-       * Resolve the poster's JID across Baileys 6.x and 7.x shapes.
-       */
       const candidates = [
         message.key.participant,
         message.key.participantAlt,
@@ -71,26 +57,14 @@ export const statusViewListener = {
       ].filter(Boolean)
 
       const participant = candidates.find(p =>
-        String(p).includes('@') &&
-        p !== 'status@broadcast'
+        String(p).includes('@') && p !== 'status@broadcast'
       )
 
       if (!participant) {
-        console.warn(
-          '[STATUS VIEW] No valid participant JID. key:',
-          {
-            participant: message.key.participant,
-            participantAlt: message.key.participantAlt,
-            remoteJidAlt: message.key.remoteJidAlt
-          }
-        )
+        console.warn('[STATUS VIEW] No valid participant JID')
         return
       }
 
-      /*
-       * Primary path: sendReceipt — recommended for status read-receipts
-       * on Baileys 7.x. Works whether `participant` is @lid or @s.whatsapp.net.
-       */
       if (typeof sock.sendReceipt === 'function') {
         await sock.sendReceipt(
           'status@broadcast',
@@ -104,18 +78,15 @@ export const statusViewListener = {
         return
       }
 
-      /*
-       * Fallback path: readMessages (some 7.x RC builds still expose it).
-       * Build a clean key — never reuse message.key directly.
-       */
       if (typeof sock.readMessages === 'function') {
-        const statusKey = {
-          remoteJid: 'status@broadcast',
-          id: message.key.id,
-          participant,
-          fromMe: false
-        }
-        await sock.readMessages([statusKey])
+        await sock.readMessages([
+          {
+            remoteJid: 'status@broadcast',
+            id: message.key.id,
+            participant,
+            fromMe: false
+          }
+        ])
         console.log(
           `[STATUS VIEW] Viewed via readMessages -> ${String(participant).slice(0, 8)}…`
         )
@@ -134,7 +105,7 @@ export const statusViewListener = {
 
 /*
  * ==============================
- * COMMAND
+ * COMMAND (small-caps styled)
  * ==============================
  */
 
@@ -155,7 +126,7 @@ const statusViewCommand = {
 
       if (!isOwner) {
         return reply(
-          '❌ ONLY THE BOT OWNER CAN CHANGE STATUS VIEW SETTINGS'
+          '❌ ᴏɴʟʏ ᴛʜᴇ ʙᴏᴛ ᴏᴡɴᴇʀ ᴄᴀɴ ᴄʜᴀɴɢᴇ ꜱᴛᴀᴛᴜꜱ ᴠɪᴇᴡ ꜱᴇᴛᴛɪɴɢꜱ'
         )
       }
 
@@ -168,8 +139,13 @@ const statusViewCommand = {
         case 'start': {
           settings.enabled = true
           await saveSettings(settings)
+
           return reply(
-            '✅ AUTO STATUS VIEW ENABLED\n\nINCOMING STATUS UPDATES WILL BE MARKED AS VIEWED'
+            [
+              '✅ ᴀᴜᴛᴏ ꜱᴛᴀᴛᴜꜱ ᴠɪᴇᴡ ᴇɴᴀʙʟᴇᴅ',
+              '',
+              'ɪɴᴄᴏᴍɪɴɢ ꜱᴛᴀᴛᴜꜱ ᴜᴘᴅᴀᴛᴇꜱ ᴡɪʟʟ ʙᴇ ᴍᴀʀᴋᴇᴅ ᴀꜱ ᴠɪᴇᴡᴇᴅ'
+            ].join('\n')
           )
         }
 
@@ -178,17 +154,18 @@ const statusViewCommand = {
         case 'stop': {
           settings.enabled = false
           await saveSettings(settings)
-          return reply('❌ AUTO STATUS VIEW DISABLED')
+
+          return reply('❌ ᴀᴜᴛᴏ ꜱᴛᴀᴛᴜꜱ ᴠɪᴇᴡ ᴅɪꜱᴀʙʟᴇᴅ')
         }
 
         case 'status': {
           return reply(
             [
-              '╭━━━〔 AUTO STATUS VIEW 〕',
+              '╭━━━〔 ᴀᴜᴛᴏ ꜱᴛᴀᴛᴜꜱ ᴠɪᴇᴡ 〕',
               '│',
-              `│ STATUS ${settings.enabled ? 'ON ✅' : 'OFF ❌'}`,
+              `│ ꜱᴛᴀᴛᴜꜱ : ${settings.enabled ? 'ᴏɴ ✅' : 'ᴏғғ ❌'}`,
               '│',
-              '│ COMMANDS',
+              '│ ᴄᴏᴍᴍᴀɴᴅꜱ',
               `│ ${getPrefix()}statusview on`,
               `│ ${getPrefix()}statusview off`,
               `│ ${getPrefix()}statusview status`,
@@ -201,7 +178,7 @@ const statusViewCommand = {
         default: {
           return reply(
             [
-              '❓ INVALID OPTION',
+              '❓ ɪɴᴠᴀʟɪᴅ ᴏᴘᴛɪᴏɴ',
               '',
               `${getPrefix()}statusview on`,
               `${getPrefix()}statusview off`,
