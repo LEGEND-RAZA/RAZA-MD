@@ -1,24 +1,12 @@
 import { getDb, saveDb } from '../database/index.js'
 
 const SETTINGS_FILE = 'status-view-settings.json'
-
-const DEFAULT_SETTINGS = {
-  enabled: true
-}
-
-/*
- * ==============================
- * SETTINGS
- * ==============================
- */
+const DEFAULT_SETTINGS = { enabled: true }
 
 async function loadSettings() {
   try {
     const saved = await getDb(SETTINGS_FILE, {})
-    return {
-      ...DEFAULT_SETTINGS,
-      ...(saved && typeof saved === 'object' ? saved : {})
-    }
+    return { ...DEFAULT_SETTINGS, ...(saved && typeof saved === 'object' ? saved : {}) }
   } catch (error) {
     console.error('[STATUS VIEW] Settings load failed:', error?.message || error)
     return { ...DEFAULT_SETTINGS }
@@ -39,12 +27,19 @@ function getPrefix() {
 
 /*
  * ==============================
- * AUTO-VIEW LISTENER
+ * AUTO-VIEW LISTENER (Baileys 7.x)
  * ==============================
  *
- * Called by handler.js for every incoming message (listeners run
- * before any prefix / owner / status filtering). We self-filter
- * here so only status@broadcast messages are acted on.
+ * Baileys 7.x uses LID JIDs for Signal sessions. A status message may
+ * carry the poster's identity in any of:
+ *   key.participant       (@lid OR @s.whatsapp.net)
+ *   key.participantAlt    (the matching PN, when participant is a LID)
+ *   message.participant   (older builds)
+ *   message.participantAlt
+ *
+ * We try them in order and use whichever looks like a real JID.
+ * sendReceipt is the primary path — it is the only reliable way to
+ * deliver a status read-receipt on 7.x.
  */
 
 export const statusViewListener = {
@@ -57,66 +52,77 @@ export const statusViewListener = {
       if (message.key.fromMe) return
 
       const jid = message.key.remoteJid
-
-      // Only process WhatsApp Status updates.
-      // Trust the handler flag if present, otherwise check the jid.
-      const isBroadcast =
-        isStatus === true || jid === 'status@broadcast'
-
+      const isBroadcast = isStatus === true || jid === 'status@broadcast'
       if (!isBroadcast) return
       if (!message.key.id) return
 
       const settings = await loadSettings()
       if (!settings.enabled) return
 
-      // The poster's JID lives on key.participant (Baileys ≥6.x) or
-      // message.participant (older / some builds). We need it to
-      // address the receipt correctly — without it, WhatsApp drops it.
-      const participant =
-        message.key.participant ||
-        message.participant ||
-        message.key.participantAlt ||
-        message.key.remoteJidAlt
+      /*
+       * Resolve the poster's JID across Baileys 6.x and 7.x shapes.
+       */
+      const candidates = [
+        message.key.participant,
+        message.key.participantAlt,
+        message.key.remoteJidAlt,
+        message.participant,
+        message.participantAlt
+      ].filter(Boolean)
 
-      if (
-        !participant ||
-        participant === 'status@broadcast' ||
-        !String(participant).includes('@')
-      ) {
-        console.warn('[STATUS VIEW] Missing participant, skipping status')
+      const participant = candidates.find(p =>
+        String(p).includes('@') &&
+        p !== 'status@broadcast'
+      )
+
+      if (!participant) {
+        console.warn(
+          '[STATUS VIEW] No valid participant JID. key:',
+          {
+            participant: message.key.participant,
+            participantAlt: message.key.participantAlt,
+            remoteJidAlt: message.key.remoteJidAlt
+          }
+        )
         return
       }
 
-      // Build a clean key — never reuse message.key directly. Extra
-      // fields like isViewOnce, server_id, or fromMe:true cause the
-      // receipt to be silently ignored by WhatsApp.
-      const statusKey = {
-        remoteJid: 'status@broadcast',
-        id: message.key.id,
-        participant,
-        fromMe: false
-      }
-
-      // Primary path: sock.readMessages (present on most Baileys builds).
-      if (typeof sock.readMessages === 'function') {
-        await sock.readMessages([statusKey])
-      }
-      // Fallback: raw receipt — works even if readMessages was removed.
-      else if (typeof sock.sendReceipt === 'function') {
+      /*
+       * Primary path: sendReceipt — recommended for status read-receipts
+       * on Baileys 7.x. Works whether `participant` is @lid or @s.whatsapp.net.
+       */
+      if (typeof sock.sendReceipt === 'function') {
         await sock.sendReceipt(
           'status@broadcast',
           participant,
           [message.key.id],
           'read'
         )
-      } else {
-        console.warn('[STATUS VIEW] Socket has no readMessages/sendReceipt')
+        console.log(
+          `[STATUS VIEW] Viewed via sendReceipt -> ${String(participant).slice(0, 8)}…`
+        )
         return
       }
 
-      console.log(
-        `[STATUS VIEW] Viewed status from ${String(participant).slice(0, 8)}…`
-      )
+      /*
+       * Fallback path: readMessages (some 7.x RC builds still expose it).
+       * Build a clean key — never reuse message.key directly.
+       */
+      if (typeof sock.readMessages === 'function') {
+        const statusKey = {
+          remoteJid: 'status@broadcast',
+          id: message.key.id,
+          participant,
+          fromMe: false
+        }
+        await sock.readMessages([statusKey])
+        console.log(
+          `[STATUS VIEW] Viewed via readMessages -> ${String(participant).slice(0, 8)}…`
+        )
+        return
+      }
+
+      console.warn('[STATUS VIEW] Socket has neither sendReceipt nor readMessages')
     } catch (error) {
       console.error(
         '[STATUS VIEW] Listener failed:',
@@ -130,11 +136,6 @@ export const statusViewListener = {
  * ==============================
  * COMMAND
  * ==============================
- *
- * Commands:
- *   .statusview on
- *   .statusview off
- *   .statusview status
  */
 
 const statusViewCommand = {
@@ -167,7 +168,6 @@ const statusViewCommand = {
         case 'start': {
           settings.enabled = true
           await saveSettings(settings)
-
           return reply(
             '✅ AUTO STATUS VIEW ENABLED\n\nINCOMING STATUS UPDATES WILL BE MARKED AS VIEWED'
           )
@@ -178,7 +178,6 @@ const statusViewCommand = {
         case 'stop': {
           settings.enabled = false
           await saveSettings(settings)
-
           return reply('❌ AUTO STATUS VIEW DISABLED')
         }
 
