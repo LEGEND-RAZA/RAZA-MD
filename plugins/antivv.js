@@ -1,16 +1,12 @@
+import { downloadMediaMessage } from '@whiskeysockets/baileys'
 import { getDb, saveDb } from '../database/index.js'
 import pino from 'pino'
 
 const SETTINGS_FILE = 'antivv-settings.json'
 const DEFAULT_SETTINGS = { enabled: true, targetJid: '' }
-
-// WhatsApp per-message media cap (images, video, audio). Documents allow more,
-// but for simplicity we use one consistent limit for all forwarded media.
 const MAX_MEDIA_BYTES = 16 * 1024 * 1024
 
 const logger = pino({ level: 'silent' })
-
-// LID → PN mapping (same approach as antidelete)
 const lidToPn = new Map()
 const pnToLid = new Map()
 
@@ -38,22 +34,14 @@ function resolveTarget(settings, sock) {
   return sock.user.id.split(':')[0] + '@s.whatsapp.net'
 }
 
-/*
- * ==============================
- * LID ↔ PN MAPPING
- * ==============================
- */
-
 function rememberPair(primary, alternate) {
   if (!primary || !alternate) return
   const p = String(primary)
   const a = String(alternate)
   if (p === a || !p.includes('@') || !a.includes('@')) return
-
   const pLid = p.endsWith('@lid')
   const aLid = a.endsWith('@lid')
   if (pLid === aLid) return
-
   if (pLid && !aLid) {
     lidToPn.set(p, a)
     pnToLid.set(a, p)
@@ -76,25 +64,18 @@ function resolveSenderJid(message) {
   const k = message?.key || {}
   const m = message || {}
   const candidates = [
-    k.participant,
-    k.participantAlt,
-    k.remoteJidAlt,
-    m.participant,
-    m.participantAlt
+    k.participant, k.participantAlt, k.remoteJidAlt,
+    m.participant, m.participantAlt
   ].filter(Boolean).map(String)
 
-  for (const c of candidates) {
-    if (c.endsWith('@s.whatsapp.net')) return c
-  }
+  for (const c of candidates) if (c.endsWith('@s.whatsapp.net')) return c
   for (const c of candidates) {
     if (c.endsWith('@lid')) {
       const pn = lidToPn.get(c)
       if (pn) return pn
     }
   }
-  for (const c of candidates) {
-    if (!c.endsWith('@lid')) return c
-  }
+  for (const c of candidates) if (!c.endsWith('@lid')) return c
   return candidates[0] || ''
 }
 
@@ -107,20 +88,11 @@ function displayNum(jid, fallback = 'unknown') {
   return num
 }
 
-/*
- * ==============================
- * VIEW-ONCE UNWRAP
- * ==============================
- */
-
 function unwrapViewOnce(message) {
   if (!message?.message) return null
-
   let m = message.message
-
   if (m.groupStatusMessageV2?.message) m = m.groupStatusMessageV2.message
   if (m.ephemeralMessage?.message) m = m.ephemeralMessage.message
-
   return (
     m.viewOnceMessage?.message ||
     m.viewOnceMessageV2?.message ||
@@ -130,62 +102,36 @@ function unwrapViewOnce(message) {
 }
 
 /*
- * ==============================
- * DOWNLOAD
- * ==============================
+ * Download via STANDALONE export — sock.downloadMediaMessage does not
+ * exist in Baileys 7.x.
  */
-
-async function downloadOnce(sock, message, inner) {
-  const ctx = {
-    logger,
-    reconnectAttempts: 5,
-    timeoutMs: 180000
-  }
-  if (typeof sock.updateMediaMessage === 'function') {
-    ctx.reuploadRequest = msg => sock.updateMediaMessage(msg)
-  }
-
-  return sock.downloadMediaMessage(
-    { message: inner, key: message.key },
-    'buffer',
-    {},
-    ctx
-  )
+async function downloadOnce(message) {
+  const ctx = { logger, reconnectAttempts: 5, timeoutMs: 180000 }
+  return downloadMediaMessage(message, 'buffer', {}, ctx)
 }
 
-async function downloadViewOnce(sock, message, inner) {
+async function downloadViewOnce(message) {
   let lastErr
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const buffer = await downloadOnce(sock, message, inner)
+      const buffer = await downloadOnce(message)
       if (!Buffer.isBuffer(buffer) || !buffer.length) {
         throw new Error('Empty media buffer')
       }
       return buffer
     } catch (e) {
       lastErr = e
-      console.error(
-        `[ANTIVV] download attempt ${attempt} failed:`,
-        e?.message || e
-      )
+      console.error(`[ANTIVV] download attempt ${attempt} failed:`, e?.message || e)
       if (attempt < 2) await new Promise(r => setTimeout(r, 2000))
     }
   }
   throw lastErr
 }
 
-/*
- * ==============================
- * FORWARD
- * ==============================
- */
-
 async function forwardViewOnce(sock, targetJid, message, inner) {
   const type = Object.keys(inner)[0]
-
   const senderJid = resolveSenderJid(message)
   const senderNum = displayNum(senderJid)
-
   const isGroup = String(message.key.remoteJid || '').endsWith('@g.us')
   const groupJid = isGroup ? String(message.key.remoteJid) : null
 
@@ -196,7 +142,10 @@ async function forwardViewOnce(sock, targetJid, message, inner) {
     groupJid ? `ɢʀᴏᴜᴘ  : ${groupJid}` : null
   ].filter(Boolean).join('\n')
 
-  const media = await downloadViewOnce(sock, message, inner)
+  const media = await downloadViewOnce({
+    message: inner,
+    key: message.key
+  })
 
   if (media.length > MAX_MEDIA_BYTES) {
     await sock.sendMessage(targetJid, {
@@ -209,7 +158,6 @@ async function forwardViewOnce(sock, targetJid, message, inner) {
   }
 
   const opts = {}
-
   if (type === 'imageMessage') {
     opts.image = media
     opts.caption = caption
@@ -218,17 +166,14 @@ async function forwardViewOnce(sock, targetJid, message, inner) {
     opts.caption = caption
   } else if (type === 'audioMessage') {
     opts.audio = media
-    opts.mimetype =
-      inner.audioMessage?.mimetype || 'audio/ogg; codecs=opus'
+    opts.mimetype = inner.audioMessage?.mimetype || 'audio/ogg; codecs=opus'
     opts.ptt = inner.audioMessage?.ptt === true
   } else if (type === 'stickerMessage') {
     opts.sticker = media
   } else if (type === 'documentMessage') {
     opts.document = media
-    opts.mimetype =
-      inner.documentMessage?.mimetype || 'application/octet-stream'
-    opts.fileName =
-      inner.documentMessage?.fileName || 'document'
+    opts.mimetype = inner.documentMessage?.mimetype || 'application/octet-stream'
+    opts.fileName = inner.documentMessage?.fileName || 'document'
     opts.caption = caption
   } else {
     await sock.sendMessage(targetJid, {
@@ -241,12 +186,6 @@ async function forwardViewOnce(sock, targetJid, message, inner) {
   return type
 }
 
-/*
- * ==============================
- * LISTENER
- * ==============================
- */
-
 export const antivvListener = {
   command: '__antivv_listener',
   category: 'tools',
@@ -256,10 +195,7 @@ export const antivvListener = {
       if (!sock || !message?.key) return
       if (message.key.remoteJid === 'status@broadcast') return
 
-      // Build the LID↔PN map from EVERY incoming message, even non-VV.
       rememberMessageIdentities(message)
-
-      // Skip own messages — the user already has them, no need to forward.
       if (message.key.fromMe) return
 
       const inner = unwrapViewOnce(message)
@@ -280,11 +216,7 @@ export const antivvListener = {
         (isGroup ? ` in ${message.key.remoteJid}` : '')
       )
 
-      // Mark as read only AFTER successful forward — the read receipt
-      // invalidates the media key, so we must download + forward first.
-      try {
-        await sock.readMessages([message.key])
-      } catch (e) {
+      try { await sock.readMessages([message.key]) } catch (e) {
         console.error('[ANTIVV] readMessages failed:', e?.message || e)
       }
     } catch (e) {
@@ -292,12 +224,6 @@ export const antivvListener = {
     }
   }
 }
-
-/*
- * ==============================
- * COMMAND
- * ==============================
- */
 
 const antivvCommand = {
   command: 'antivv',
@@ -308,7 +234,6 @@ const antivvCommand = {
     try {
       const jid = message?.key?.remoteJid
       if (!jid) return
-
       const reply = text =>
         sock.sendMessage(jid, { text }, { quoted: message }).catch(() => {})
 
@@ -325,19 +250,15 @@ const antivvCommand = {
           settings.enabled = true
           await saveSettings(settings)
           return reply('✅ ᴀᴜᴛᴏ ᴠɪᴇᴡ-ᴏɴᴄᴇ ʀᴇᴠᴇᴀʟ ᴇɴᴀʙʟᴇᴅ')
-
         case 'off':
         case 'disable':
           settings.enabled = false
           await saveSettings(settings)
           return reply('❌ ᴀᴜᴛᴏ ᴠɪᴇᴡ-ᴏɴᴄᴇ ʀᴇᴠᴇᴀʟ ᴅɪꜱᴀʙʟᴇᴅ')
-
         case 'set': {
           const raw = String(args[1] || '').trim()
           if (!raw) return reply('ᴜꜱᴀɢᴇ: .antivv set <number|jid>')
-          const targetJid = raw.includes('@')
-            ? raw
-            : raw.replace(/\D/g, '') + '@s.whatsapp.net'
+          const targetJid = raw.includes('@') ? raw : raw.replace(/\D/g, '') + '@s.whatsapp.net'
           if (!/^[\w.-]+@(s\.whatsapp\.net|g\.us)$/i.test(targetJid)) {
             return reply('❌ ɪɴᴠᴀʟɪᴅ ᴊɪᴅ')
           }
@@ -345,12 +266,10 @@ const antivvCommand = {
           await saveSettings(settings)
           return reply(`✅ ᴀᴜᴛᴏ-ᴠᴠ ᴛᴀʀɢᴇᴛ ꜱᴇᴛ ᴛᴏ\n${targetJid}`)
         }
-
         case 'reset':
           settings.targetJid = ''
           await saveSettings(settings)
           return reply('✅ ᴀᴜᴛᴏ-ᴠᴠ ᴛᴀʀɢᴇᴛ ʀᴇꜱᴇᴛ ᴛᴏ ʙᴏᴛ ᴊɪᴅ')
-
         case 'status':
         default: {
           const target = resolveTarget(settings, sock)
