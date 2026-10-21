@@ -1,23 +1,10 @@
+import { downloadMediaMessage } from '@whiskeysockets/baileys'
 import { getDb, saveDb } from '../database/index.js'
 import pino from 'pino'
 
 const SETTINGS_FILE = 'antidelete-settings.json'
 const DEFAULT_SETTINGS = { enabled: true, targetJid: '' }
 
-/*
- * ==============================
- * AUTO-CLEAR CONFIGURATION
- * ==============================
- * All values are overridable via Heroku config vars.
- *
- *   ANTIDELETE_CACHE_TTL_MIN  how long an entry lives (default 30 min)
- *   ANTIDELETE_MAX_CACHE      soft size limit (default 2000)
- *   ANTIDELETE_HARD_LIMIT     absolute limit   (default MAX * 2)
- *   ANTIDELETE_PRUNE_MIN      prune interval   (default 3 min)
- *   ANTIDELETE_SKIP           comma-separated message types to skip
- *   ANTIDELETE_PRE_DOWNLOAD   "true" caches media buffers at receive time
- *   ANTIDELETE_PRE_MAX_MB     size cap for pre-download (default 5)
- */
 const CACHE_TTL_MIN = Number(process.env.ANTIDELETE_CACHE_TTL_MIN) || 30
 const CACHE_TTL_MS = CACHE_TTL_MIN * 60 * 1000
 const MAX_CACHE = Number(process.env.ANTIDELETE_MAX_CACHE) || 2000
@@ -43,12 +30,6 @@ const pnToLid = new Map()
 let pruneIntervalStarted = false
 let updateHandlerRegistered = false
 
-/*
- * ==============================
- * SETTINGS
- * ==============================
- */
-
 async function loadSettings() {
   try {
     const saved = await getDb(SETTINGS_FILE, {})
@@ -73,22 +54,14 @@ function resolveTarget(settings, sock) {
   return sock.user.id.split(':')[0] + '@s.whatsapp.net'
 }
 
-/*
- * ==============================
- * LID ↔ PN MAPPING
- * ==============================
- */
-
 function rememberPair(primary, alternate) {
   if (!primary || !alternate) return
   const p = String(primary)
   const a = String(alternate)
   if (p === a || !p.includes('@') || !a.includes('@')) return
-
   const pLid = p.endsWith('@lid')
   const aLid = a.endsWith('@lid')
   if (pLid === aLid) return
-
   if (pLid && !aLid) {
     lidToPn.set(p, a)
     pnToLid.set(a, p)
@@ -111,25 +84,18 @@ function pickPnJid(message) {
   const k = message?.key || {}
   const m = message || {}
   const candidates = [
-    k.participant,
-    k.participantAlt,
-    k.remoteJidAlt,
-    m.participant,
-    m.participantAlt
+    k.participant, k.participantAlt, k.remoteJidAlt,
+    m.participant, m.participantAlt
   ].filter(Boolean).map(String)
 
-  for (const c of candidates) {
-    if (c.endsWith('@s.whatsapp.net')) return c
-  }
+  for (const c of candidates) if (c.endsWith('@s.whatsapp.net')) return c
   for (const c of candidates) {
     if (c.endsWith('@lid')) {
       const pn = lidToPn.get(c)
       if (pn) return pn
     }
   }
-  for (const c of candidates) {
-    if (!c.endsWith('@lid')) return c
-  }
+  for (const c of candidates) if (!c.endsWith('@lid')) return c
   return candidates[0] || String(k.remoteJid || '')
 }
 
@@ -156,14 +122,34 @@ function normalizeBotJid(id) {
   return num ? `${num}@s.whatsapp.net` : ''
 }
 
-/*
- * ==============================
- * CACHE (id-only — no dual keys)
- * ==============================
- * Each message is stored under its WhatsApp message id. The id is
- * globally unique per message, so this survives LID/PN mismatches
- * between receive and revoke without any composite keys.
- */
+const MEDIA_TYPES = new Set([
+  'imageMessage', 'videoMessage', 'audioMessage',
+  'stickerMessage', 'documentMessage'
+])
+
+function getMediaType(message) {
+  const inner = message?.message || {}
+  const unwrapped =
+    inner.ephemeralMessage?.message ||
+    inner.viewOnceMessage?.message ||
+    inner.viewOnceMessageV2?.message ||
+    inner.viewOnceMessageV2Extension?.message ||
+    inner.documentWithCaptionMessage?.message ||
+    inner
+  const t = Object.keys(unwrapped)[0]
+  return MEDIA_TYPES.has(t) ? t : null
+}
+
+function cloneForCache(message) {
+  return {
+    key: { ...message.key },
+    message: { ...message.message },
+    messageTimestamp: message.messageTimestamp,
+    pushName: message.pushName,
+    participant: message.participant,
+    participantAlt: message.participantAlt
+  }
+}
 
 function cacheMessage(message, preDownload) {
   const id = message?.key?.id
@@ -172,17 +158,13 @@ function cacheMessage(message, preDownload) {
 
   rememberMessageIdentities(message)
 
-  const entry = {
+  messageCache.set(id, {
     message: cloneForCache(message),
     ts: Date.now(),
     buffer: preDownload?.buffer || null,
     bufferType: preDownload?.type || null
-  }
+  })
 
-  messageCache.set(id, entry)
-
-  // Size-triggered eviction: when we cross MAX_CACHE, drop the oldest 10%
-  // in one batch so we don't pay O(n log n) on every subsequent insert.
   if (messageCache.size > MAX_CACHE) {
     const evictCount = Math.max(1, Math.floor(MAX_CACHE * 0.1))
     const n = evictOldest(evictCount)
@@ -217,25 +199,15 @@ function markProcessedRevoke(id) {
   return false
 }
 
-/*
- * ==============================
- * AUTO-CLEAR MECHANISMS
- * ==============================
- */
-
-// Delete the oldest `count` entries in one batch. Returns number removed.
 function evictOldest(count) {
   if (!messageCache.size || count <= 0) return 0
   const entries = [...messageCache.entries()]
   entries.sort((a, b) => a[1].ts - b[1].ts)
   const target = Math.min(count, entries.length)
-  for (let i = 0; i < target; i++) {
-    messageCache.delete(entries[i][0])
-  }
+  for (let i = 0; i < target; i++) messageCache.delete(entries[i][0])
   return target
 }
 
-// Delete all entries whose age exceeds CACHE_TTL_MS. Returns number removed.
 function pruneExpired() {
   const now = Date.now()
   let removed = 0
@@ -248,7 +220,6 @@ function pruneExpired() {
   return removed
 }
 
-// Periodic prune + hard-limit safeguard.
 function runAutoClear() {
   const expired = pruneExpired()
   if (expired > 0) {
@@ -272,87 +243,35 @@ function startPruneInterval() {
 }
 
 /*
- * ==============================
- * MEDIA TYPE HELPERS
- * ==============================
+ * Download via the STANDALONE export — sock.downloadMediaMessage does not
+ * exist in Baileys 7.x.
  */
-
-const MEDIA_TYPES = new Set([
-  'imageMessage',
-  'videoMessage',
-  'audioMessage',
-  'stickerMessage',
-  'documentMessage'
-])
-
-function getMediaType(message) {
-  const inner = message?.message || {}
-  const unwrapped =
-    inner.ephemeralMessage?.message ||
-    inner.viewOnceMessage?.message ||
-    inner.viewOnceMessageV2?.message ||
-    inner.viewOnceMessageV2Extension?.message ||
-    inner.documentWithCaptionMessage?.message ||
-    inner
-  const t = Object.keys(unwrapped)[0]
-  return MEDIA_TYPES.has(t) ? t : null
-}
-
-function cloneForCache(message) {
-  return {
-    key: { ...message.key },
-    message: { ...message.message },
-    messageTimestamp: message.messageTimestamp,
-    pushName: message.pushName,
-    participant: message.participant,
-    participantAlt: message.participantAlt
-  }
-}
-
-/*
- * ==============================
- * DOWNLOAD HELPERS
- * ==============================
- */
-
-async function downloadOnce(sock, message) {
+async function downloadOnce(message) {
   const ctx = {
     logger,
     reconnectAttempts: 5,
     timeoutMs: 180000
   }
-  if (typeof sock.updateMediaMessage === 'function') {
-    ctx.reuploadRequest = msg => sock.updateMediaMessage(msg)
-  }
-  return sock.downloadMediaMessage(message, 'buffer', {}, ctx)
+  return downloadMediaMessage(message, 'buffer', {}, ctx)
 }
 
-async function downloadWithRetry(sock, message) {
+async function downloadWithRetry(message) {
   let lastErr
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const buffer = await downloadOnce(sock, message)
+      const buffer = await downloadOnce(message)
       if (!Buffer.isBuffer(buffer) || !buffer.length) {
         throw new Error('Empty media buffer')
       }
       return buffer
     } catch (e) {
       lastErr = e
-      console.error(
-        `[ANTIDELETE] download attempt ${attempt} failed:`,
-        e?.message || e
-      )
+      console.error(`[ANTIDELETE] download attempt ${attempt} failed:`, e?.message || e)
       if (attempt < 2) await new Promise(r => setTimeout(r, 3000))
     }
   }
   throw lastErr
 }
-
-/*
- * ==============================
- * FORWARD
- * ==============================
- */
 
 async function forwardToTarget(sock, targetJid, entry, revokerJid) {
   const original = entry.message
@@ -409,12 +328,9 @@ async function forwardToTarget(sock, targetJid, entry, revokerJid) {
     }
 
     let media = entry.buffer
-    if (!media) {
-      media = await downloadWithRetry(sock, original)
-    }
+    if (!media) media = await downloadWithRetry(original)
 
     const sendOpts = {}
-
     if (type === 'imageMessage') {
       sendOpts.image = media
       sendOpts.caption = header
@@ -423,17 +339,14 @@ async function forwardToTarget(sock, targetJid, entry, revokerJid) {
       sendOpts.caption = header
     } else if (type === 'audioMessage') {
       sendOpts.audio = media
-      sendOpts.mimetype =
-        inner.audioMessage?.mimetype || 'audio/ogg; codecs=opus'
+      sendOpts.mimetype = inner.audioMessage?.mimetype || 'audio/ogg; codecs=opus'
       sendOpts.ptt = inner.audioMessage?.ptt === true
     } else if (type === 'stickerMessage') {
       sendOpts.sticker = media
     } else if (type === 'documentMessage') {
       sendOpts.document = media
-      sendOpts.mimetype =
-        inner.documentMessage?.mimetype || 'application/octet-stream'
-      sendOpts.fileName =
-        inner.documentMessage?.fileName || 'document'
+      sendOpts.mimetype = inner.documentMessage?.mimetype || 'application/octet-stream'
+      sendOpts.fileName = inner.documentMessage?.fileName || 'document'
       sendOpts.caption = header
     } else {
       await sock.sendMessage(targetJid, {
@@ -458,31 +371,21 @@ async function forwardToTarget(sock, targetJid, entry, revokerJid) {
   }
 }
 
-/*
- * ==============================
- * SETUP HOOK
- * ==============================
- */
-
 async function setup(sock) {
   if (!sock || updateHandlerRegistered) return
   updateHandlerRegistered = true
 
   console.log('[ANTIDELETE] messages.update handler registered')
   if (PRE_DOWNLOAD) {
-    console.log(
-      `[ANTIDELETE] pre-download enabled (max ${PRE_DOWNLOAD_MAX_BYTES / 1024 / 1024} MB per entry)`
-    )
+    console.log(`[ANTIDELETE] pre-download enabled (max ${PRE_DOWNLOAD_MAX_BYTES / 1024 / 1024} MB)`)
   }
 
-  // Start the periodic auto-clear.
   startPruneInterval()
 
   sock.ev.on('messages.update', async updates => {
     try {
       const settings = await loadSettings()
       if (!settings.enabled) return
-
       const targetJid = resolveTarget(settings, sock)
       if (!targetJid) return
 
@@ -511,12 +414,6 @@ async function setup(sock) {
   })
 }
 
-/*
- * ==============================
- * LISTENER
- * ==============================
- */
-
 export const antideleteListener = {
   command: '__antidelete_listener',
   category: 'tools',
@@ -532,15 +429,12 @@ export const antideleteListener = {
         const mediaType = getMediaType(message)
         if (mediaType && !SKIP_TYPES.has(mediaType)) {
           try {
-            const buffer = await downloadWithRetry(sock, message)
+            const buffer = await downloadWithRetry(message)
             if (buffer.length <= PRE_DOWNLOAD_MAX_BYTES) {
               preDownload = { buffer, type: mediaType }
             }
           } catch (e) {
-            console.error(
-              '[ANTIDELETE] pre-download failed (will retry on revoke):',
-              e?.message || e
-            )
+            console.error('[ANTIDELETE] pre-download failed (will retry on revoke):', e?.message || e)
           }
         }
       }
@@ -549,12 +443,10 @@ export const antideleteListener = {
 
       const protocol = message.message?.protocolMessage
       if (!protocol || protocol.type !== 0 || !protocol.key) return
-
       if (markProcessedRevoke(protocol.key.id)) return
 
       const settings = await loadSettings()
       if (!settings.enabled) return
-
       const targetJid = resolveTarget(settings, sock)
       if (!targetJid) return
 
@@ -573,12 +465,6 @@ export const antideleteListener = {
   }
 }
 
-/*
- * ==============================
- * COMMAND
- * ==============================
- */
-
 const antideleteCommand = {
   command: 'antidelete',
   category: 'tools',
@@ -588,7 +474,6 @@ const antideleteCommand = {
     try {
       const jid = message?.key?.remoteJid
       if (!jid) return
-
       const reply = text =>
         sock.sendMessage(jid, { text }, { quoted: message }).catch(() => {})
 
@@ -605,19 +490,15 @@ const antideleteCommand = {
           settings.enabled = true
           await saveSettings(settings)
           return reply('✅ ᴀɴᴛɪ-ᴅᴇʟᴇᴛᴇ ᴇɴᴀʙʟᴇᴅ\n\nᴅᴇʟᴇᴛᴇᴅ ᴍᴇꜱꜱᴀɢᴇꜱ ᴡɪʟʟ ʙᴇ ꜰᴏʀᴡᴀʀᴅᴇᴅ ᴛᴏ ʏᴏᴜ')
-
         case 'off':
         case 'disable':
           settings.enabled = false
           await saveSettings(settings)
           return reply('❌ ᴀɴᴛɪ-ᴅᴇʟᴇᴛᴇ ᴅɪꜱᴀʙʟᴇᴅ')
-
         case 'set': {
           const raw = String(args[1] || '').trim()
           if (!raw) return reply('ᴜꜱᴀɢᴇ: .antidelete set <number|jid>')
-          const targetJid = raw.includes('@')
-            ? raw
-            : raw.replace(/\D/g, '') + '@s.whatsapp.net'
+          const targetJid = raw.includes('@') ? raw : raw.replace(/\D/g, '') + '@s.whatsapp.net'
           if (!/^[\w.-]+@(s\.whatsapp\.net|g\.us)$/i.test(targetJid)) {
             return reply('❌ ɪɴᴠᴀʟɪᴅ ᴊɪᴅ')
           }
@@ -625,12 +506,10 @@ const antideleteCommand = {
           await saveSettings(settings)
           return reply(`✅ ᴀɴᴛɪ-ᴅᴇʟᴇᴛᴇ ᴛᴀʀɢᴇᴛ ꜱᴇᴛ ᴛᴏ\n${targetJid}`)
         }
-
         case 'reset':
           settings.targetJid = ''
           await saveSettings(settings)
           return reply('✅ ᴀɴᴛɪ-ᴅᴇʟᴇᴛᴇ ᴛᴀʀɢᴇᴛ ʀᴇꜱᴇᴛ ᴛᴏ ʙᴏᴛ ᴊɪᴅ')
-
         case 'clear': {
           const n = messageCache.size
           messageCache.clear()
@@ -638,7 +517,6 @@ const antideleteCommand = {
           console.log(`[ANTIDELETE] manual clear — removed ${n} entries`)
           return reply(`✅ ᴄᴀᴄʜᴇ ᴄʟᴇᴀʀᴇᴅ (${n} ᴇɴᴛʀɪᴇꜱ ʀᴇᴍᴏᴠᴇᴅ)`)
         }
-
         case 'status':
         default: {
           const target = resolveTarget(settings, sock)
