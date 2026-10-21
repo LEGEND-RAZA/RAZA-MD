@@ -3,9 +3,10 @@ import { getDb, saveDb } from '../database/index.js'
 const SETTINGS_FILE = 'antidelete-settings.json'
 const DEFAULT_SETTINGS = { enabled: true, targetJid: '' }
 
-const MAX_CACHE = 2000
-const CACHE_TTL_MS = 30 * 60 * 1000
-const messageCache = new Map()
+const MAX_CACHE = 5000
+const CACHE_TTL_MS = 60 * 60 * 1000      // 1 hour — was 30 min
+const messageCache = new Map()            // key -> { message, ts }
+const processedRevokes = new Set()
 let pruneIntervalStarted = false
 let updateHandlerRegistered = false
 
@@ -33,38 +34,59 @@ function resolveTarget(settings, sock) {
   return sock.user.id.split(':')[0] + '@s.whatsapp.net'
 }
 
-function cacheKeyOf(key) {
-  if (!key?.id || !key?.remoteJid) return null
-  return `${key.remoteJid}:${key.id}`
-}
-
+/*
+ * Cache under BOTH keys so a LID/PN mismatch between receive and revoke
+ * still resolves. `id` alone is unique enough within the TTL window.
+ */
 function cacheMessage(message) {
-  if (!message?.key?.id || !message?.key?.remoteJid) return
-  if (message.key.fromMe) return
+  if (!message?.key?.id) return
   if (message.key.remoteJid === 'status@broadcast') return
 
-  const cacheKey = cacheKeyOf(message.key)
-  if (!cacheKey) return
+  const entry = { message, ts: Date.now() }
+  const id = message.key.id
+  const jid = message.key.remoteJid
 
-  messageCache.set(cacheKey, { message, ts: Date.now() })
+  messageCache.set(id, entry)
+  if (jid) messageCache.set(`${jid}:${id}`, entry)
 
-  if (messageCache.size > MAX_CACHE) {
+  console.log('[ANTIDELETE] cached', {
+    id: id.slice(0, 8),
+    jid,
+    type: Object.keys(message.message || {})[0],
+    fromMe: message.key.fromMe,
+    cacheSize: messageCache.size
+  })
+
+  if (messageCache.size > MAX_CACHE * 2) {
     const sorted = [...messageCache.entries()].sort((a, b) => a[1].ts - b[1].ts)
-    const excess = messageCache.size - MAX_CACHE
+    const excess = messageCache.size - MAX_CACHE * 2
     for (let i = 0; i < excess; i++) messageCache.delete(sorted[i][0])
   }
 }
 
 function getCached(key) {
-  const cacheKey = cacheKeyOf(key)
-  if (!cacheKey) return null
-  const entry = messageCache.get(cacheKey)
+  if (!key?.id) return null
+  // Try id-only first (survives LID/PN mismatch)
+  let entry = messageCache.get(key.id)
+  if (!entry && key.remoteJid) entry = messageCache.get(`${key.remoteJid}:${key.id}`)
   if (!entry) return null
   if (Date.now() - entry.ts > CACHE_TTL_MS) {
-    messageCache.delete(cacheKey)
+    messageCache.delete(key.id)
+    if (key.remoteJid) messageCache.delete(`${key.remoteJid}:${key.id}`)
     return null
   }
   return entry.message
+}
+
+function markProcessedRevoke(id) {
+  if (!id) return false
+  if (processedRevokes.has(id)) return true
+  processedRevokes.add(id)
+  if (processedRevokes.size > 1000) {
+    const first = processedRevokes.values().next().value
+    processedRevokes.delete(first)
+  }
+  return false
 }
 
 function pruneCache() {
@@ -101,6 +123,7 @@ async function forwardToTarget(sock, targetJid, original, revokerJid) {
     if (type === 'conversation' || type === 'extendedTextMessage') {
       const text = inner.conversation || inner.extendedTextMessage?.text || ''
       await sock.sendMessage(targetJid, { text: `${header}\n\n${text}` })
+      console.log('[ANTIDELETE] forwarded text')
       return
     }
 
@@ -118,9 +141,9 @@ async function forwardToTarget(sock, targetJid, original, revokerJid) {
       await sock.sendMessage(targetJid, { text: `${header}\n\n[Unsupported: ${type}]` })
       return
     }
-
     if (type !== 'stickerMessage') sendOpts.caption = header
     await sock.sendMessage(targetJid, sendOpts)
+    console.log(`[ANTIDELETE] forwarded ${type}`)
   } catch (e) {
     console.error('[ANTIDELETE] Forward failed:', e?.message || e)
     try {
@@ -135,31 +158,45 @@ async function setup(sock) {
   if (!sock || updateHandlerRegistered) return
   updateHandlerRegistered = true
 
+  console.log('[ANTIDELETE] setup(): registering messages.update listener')
+
   sock.ev.on('messages.update', async updates => {
     try {
+      console.log(`[ANTIDELETE] messages.update fired (${updates.length} item(s))`)
+
       const settings = await loadSettings()
-      if (!settings.enabled) return
+      if (!settings.enabled) {
+        console.log('[ANTIDELETE] disabled, skipping')
+        return
+      }
 
       const targetJid = resolveTarget(settings, sock)
       if (!targetJid) return
 
       for (const item of updates) {
         const { key, update } = item || {}
+        console.log('[ANTIDELETE] update event:', {
+          id: key?.id?.slice(0, 8),
+          remoteJid: key?.remoteJid,
+          fromMe: key?.fromMe,
+          stub: update?.messageStubType
+        })
 
-        // Revoke = messageStubType 1 (WAMessageStubType.REVOKE)
-        const isRevoke = update?.messageStubType === 1
-        if (!isRevoke) continue
+        if (update?.messageStubType !== 1) continue
+        if (markProcessedRevoke(key?.id)) {
+          console.log('[ANTIDELETE] already processed via inline path')
+          continue
+        }
 
         const cached = getCached(key)
-        if (!cached) continue
+        if (!cached) {
+          console.log(`[ANTIDELETE] ✗ Revoked message not in cache (${key?.id?.slice(0, 8)}…) [messages.update]`)
+          continue
+        }
 
-        const revoker =
-          update?.messageStubParameters?.[0] ||
-          key?.participant ||
-          key?.remoteJid
-
+        const revoker = update?.messageStubParameters?.[0] || key?.participant || key?.remoteJid
         await forwardToTarget(sock, targetJid, cached, revoker)
-        console.log(`[ANTIDELETE] Recovered deleted message (${key.id?.slice(0, 8)}…)`)
+        console.log(`[ANTIDELETE] ✓ recovered via messages.update (${key?.id?.slice(0, 8)}…)`)
       }
     } catch (e) {
       console.error('[ANTIDELETE] messages.update handler failed:', e?.message || e)
@@ -180,15 +217,24 @@ export const antideleteListener = {
   async run({ sock, message }) {
     try {
       if (!sock || !message?.key) return
-      if (message.key.fromMe) return
       if (message.key.remoteJid === 'status@broadcast') return
 
-      // Always cache incoming messages
       cacheMessage(message)
 
-      // Also handle inline protocolMessage REVOKE (protocol.type === 0)
+      // Inline protocolMessage REVOKE (protocol.type === 0)
       const protocol = message.message?.protocolMessage
       if (!protocol || protocol.type !== 0 || !protocol.key) return
+
+      console.log('[ANTIDELETE] inline revoke:', {
+        id: protocol.key.id?.slice(0, 8),
+        remoteJid: protocol.key.remoteJid,
+        fromMe: protocol.key.fromMe
+      })
+
+      if (markProcessedRevoke(protocol.key.id)) {
+        console.log('[ANTIDELETE] already processed via messages.update')
+        return
+      }
 
       const settings = await loadSettings()
       if (!settings.enabled) return
@@ -198,13 +244,13 @@ export const antideleteListener = {
 
       const cached = getCached(protocol.key)
       if (!cached) {
-        console.log(`[ANTIDELETE] Revoked message not in cache (${protocol.key.id?.slice(0, 8)}…)`)
+        console.log(`[ANTIDELETE] ✗ Revoked message not in cache (${protocol.key.id?.slice(0, 8)}…) [inline]`)
         return
       }
 
       const revoker = message.key.participant || message.key.remoteJid
       await forwardToTarget(sock, targetJid, cached, revoker)
-      console.log(`[ANTIDELETE] Recovered (protocol) deleted message (${protocol.key.id?.slice(0, 8)}…)`)
+      console.log(`[ANTIDELETE] ✓ recovered via inline (${protocol.key.id?.slice(0, 8)}…)`)
     } catch (e) {
       console.error('[ANTIDELETE] Listener failed:', e?.message || e)
     }
@@ -272,7 +318,7 @@ const antideleteCommand = {
             `│ ꜱᴛᴀᴛᴜꜱ : ${settings.enabled ? 'ᴏɴ ✅' : 'ᴏғғ ❌'}`,
             `│ ᴛᴀʀɢᴇᴛ : ${settings.targetJid || '(bot jid)'}`,
             `│ ʀᴇꜱᴏʟᴠᴇᴅ : ${target || '—'}`,
-            `│ ᴄᴀᴄʜᴇ : ${messageCache.size} ᴍꜱɢꜱ`,
+            `│ ᴄᴀᴄʜᴇ : ${messageCache.size} ᴋᴇʏꜱ`,
             '│',
             '│ ᴄᴏᴍᴍᴀɴᴅꜱ',
             '│ .antidelete on',
