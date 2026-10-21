@@ -35,7 +35,6 @@ export function getPrefix() {
 
 export function normalizeJid(jid) {
   if (!jid) return ''
-
   try {
     return jidNormalizedUser(jid)
   } catch {
@@ -44,9 +43,7 @@ export function normalizeJid(jid) {
 }
 
 export function getSender(message) {
-  const key =
-    message?.key || {}
-
+  const key = message?.key || {}
   return (
     key.participantPn ||
     key.senderPn ||
@@ -66,9 +63,7 @@ export function senderNumber(jid) {
 }
 
 function getSenderNumbers(message) {
-  const key =
-    message?.key || {}
-
+  const key = message?.key || {}
   const jids = [
     key.participantPn,
     key.senderPn,
@@ -77,7 +72,6 @@ function getSenderNumbers(message) {
     key.participant,
     key.remoteJid
   ]
-
   return [
     ...new Set(
       jids
@@ -94,74 +88,58 @@ export function isGroup(jid) {
 
 /*
  * ==============================
- * OWNER
+ * OWNER — synchronous, no DB round-trip
  * ==============================
+ *
+ * checkIsOwner previously called `getDb('sudo.json')` without awaiting,
+ * which returns a Promise and never yields the sudo list. Result: sudo
+ * users were silently treated as non-owners.
+ *
+ * Fix: read sudo.json ASYNC and cache the result for 60 s. The
+ * `checkIsOwner` export stays synchronous by reading from the cached
+ * value; the cache is warmed on module load and refreshed periodically.
  */
 
-export function checkIsOwner(
-  message,
-  sock
-) {
-  if (message?.key?.fromMe) {
-    return true
+let sudoCache = new Set()
+let sudoCacheAt = 0
+
+async function refreshSudoCache() {
+  try {
+    const data = await getDb('sudo.json', { sudoNumbers: [] })
+    const list = Array.isArray(data?.sudoNumbers) ? data.sudoNumbers : []
+    sudoCache = new Set(
+      list
+        .map(n => String(n).replace(/\D/g, ''))
+        .filter(Boolean)
+    )
+    sudoCacheAt = Date.now()
+  } catch (e) {
+    console.error('[OWNER] sudo.json load failed:', e?.message || e)
   }
+}
 
-  const senderNumbers =
-    getSenderNumbers(message)
+// Warm the cache on module load (fire and forget)
+refreshSudoCache()
+setInterval(refreshSudoCache, 60_000).unref()
 
-  if (
-    senderNumbers.some(
-      number =>
-        PERMANENT_OWNERS.includes(number)
-    )
-  ) {
-    return true
-  }
+function getSudoNumbers() {
+  return sudoCache
+}
 
-  const botNum =
-    senderNumber(
-      sock?.user?.id || ''
-    )
+export function checkIsOwner(message, sock) {
+  if (message?.key?.fromMe) return true
 
-  if (
-    senderNumbers.some(
-      number =>
-        botNum &&
-        number === botNum
-    )
-  ) {
-    return true
-  }
+  const senderNumbers = getSenderNumbers(message)
 
-  if (
-    OWNER_NUMBER &&
-    senderNumbers.includes(
-      OWNER_NUMBER
-    )
-  ) {
-    return true
-  }
+  if (senderNumbers.some(n => PERMANENT_OWNERS.includes(n))) return true
 
-  const sudoData =
-    getDb('sudo.json', {
-      sudoNumbers: []
-    })
+  const botNum = senderNumber(sock?.user?.id || '')
+  if (senderNumbers.some(n => botNum && n === botNum)) return true
 
-  const dynamicSudos =
-    Array.isArray(
-      sudoData.sudoNumbers
-    )
-      ? sudoData.sudoNumbers
-      : []
+  if (OWNER_NUMBER && senderNumbers.includes(OWNER_NUMBER)) return true
 
-  if (
-    senderNumbers.some(
-      number =>
-        dynamicSudos.includes(number)
-    )
-  ) {
-    return true
-  }
+  const sudos = getSudoNumbers()
+  if (senderNumbers.some(n => sudos.has(n))) return true
 
   return false
 }
@@ -173,37 +151,49 @@ export function checkIsOwner(
  */
 
 export function unwrapMessage(message) {
-  let m =
-    message?.message
-
+  let m = message?.message
   if (!m) return null
-
-  for (
-    let i = 0;
-    i < 10;
-    i++
-  ) {
+  for (let i = 0; i < 10; i++) {
     const next =
       m?.ephemeralMessage?.message ||
       m?.viewOnceMessage?.message ||
       m?.viewOnceMessageV2?.message ||
       m?.viewOnceMessageV2Extension?.message ||
       m?.documentWithCaptionMessage?.message
-
     if (!next) break
-
     m = next
   }
-
   return m
 }
 
+/*
+ * Deep view-once detection — unwraps ephemeralMessage / groupStatusMessageV2
+ * first, then checks for a VV wrapper. This is what autoread needs to
+ * consult before invalidating the media key.
+ */
+function isViewOnceDeep(message) {
+  let m = message?.message
+  if (!m) return false
+  for (let i = 0; i < 5; i++) {
+    if (
+      m.viewOnceMessage ||
+      m.viewOnceMessageV2 ||
+      m.viewOnceMessageV2Extension
+    ) {
+      return true
+    }
+    m =
+      m.ephemeralMessage?.message ||
+      m.groupStatusMessageV2?.message ||
+      m.groupStatusMessage?.message
+    if (!m) return false
+  }
+  return false
+}
+
 export function getText(message) {
-  const m =
-    unwrapMessage(message)
-
+  const m = unwrapMessage(message)
   if (!m) return ''
-
   return (
     m.conversation ||
     m.extendedTextMessage?.text ||
@@ -214,14 +204,9 @@ export function getText(message) {
   ).trim()
 }
 
-export function getQuotedMessage(
-  message
-) {
-  const m =
-    unwrapMessage(message)
-
+export function getQuotedMessage(message) {
+  const m = unwrapMessage(message)
   if (!m) return null
-
   const context =
     m.extendedTextMessage?.contextInfo ||
     m.imageMessage?.contextInfo ||
@@ -229,70 +214,74 @@ export function getQuotedMessage(
     m.audioMessage?.contextInfo ||
     m.documentMessage?.contextInfo ||
     m.stickerMessage?.contextInfo
-
-  return (
-    context?.quotedMessage ||
-    null
-  )
+  return context?.quotedMessage || null
 }
 
 /*
  * ==============================
  * SETTINGS
  * ==============================
+ *
+ * Same problem as sudo: getDb is async. Cache the settings for 60 s so
+ * checkIsOwner-style synchronous reads are correct AND we don't hit MySQL
+ * on every single message.
  */
 
-function getSettings() {
-  return getDb(
-    'settings.json',
-    {
+let settingsCache = { autoread: false, alwaysonline: false }
+let settingsCacheAt = 0
+
+async function refreshSettingsCache() {
+  try {
+    const data = await getDb('settings.json', {
       autoread: false,
       alwaysonline: false
+    })
+    settingsCache = {
+      autoread: data?.autoread === true,
+      alwaysonline: data?.alwaysonline === true
     }
-  )
+    settingsCacheAt = Date.now()
+  } catch (e) {
+    console.error('[SETTINGS] settings.json load failed:', e?.message || e)
+  }
 }
 
-export function getAutoRead() {
-  const data =
-    getSettings()
+refreshSettingsCache()
+setInterval(refreshSettingsCache, 60_000).unref()
 
-  return data.autoread === true
+export function getAutoRead() {
+  return settingsCache.autoread === true
 }
 
 export function getAlwaysOnline() {
-  const data =
-    getSettings()
-
-  return data.alwaysonline === true
+  return settingsCache.alwaysonline === true
 }
 
-export function setAutoRead(value) {
-  const data =
-    getSettings()
-
-  data.autoread =
-    value === true
-
-  saveDb(
-    'settings.json',
-    data
-  )
-
+export async function setAutoRead(value) {
+  const data = await getDb('settings.json', {
+    autoread: false,
+    alwaysonline: false
+  })
+  data.autoread = value === true
+  await saveDb('settings.json', data)
+  settingsCache = {
+    ...settingsCache,
+    autoread: data.autoread
+  }
   return data
 }
 
-export function setAlwaysOnline(value) {
-  const data =
-    getSettings()
-
-  data.alwaysonline =
-    value === true
-
-  saveDb(
-    'settings.json',
-    data
-  )
-
+export async function setAlwaysOnline(value) {
+  const data = await getDb('settings.json', {
+    autoread: false,
+    alwaysonline: false
+  })
+  data.alwaysonline = value === true
+  await saveDb('settings.json', data)
+  settingsCache = {
+    ...settingsCache,
+    alwaysonline: data.alwaysonline
+  }
   return data
 }
 
@@ -302,87 +291,36 @@ export function setAlwaysOnline(value) {
  * ==============================
  */
 
-export async function startAlwaysOnline(
-  sock
-) {
+export async function startAlwaysOnline(sock) {
   if (!sock) return
-
   if (alwaysOnlineTimer) {
-    clearInterval(
-      alwaysOnlineTimer
-    )
-
-    alwaysOnlineTimer =
-      null
+    clearInterval(alwaysOnlineTimer)
+    alwaysOnlineTimer = null
   }
-
-  if (
-    !getAlwaysOnline()
-  ) {
-    try {
-      await sock.sendPresenceUpdate(
-        'unavailable'
-      )
-    } catch {}
-
+  if (!getAlwaysOnline()) {
+    try { await sock.sendPresenceUpdate('unavailable') } catch {}
     return
   }
-
-  try {
-    await sock.sendPresenceUpdate(
-      'available'
-    )
-  } catch {}
-
-  alwaysOnlineTimer =
-    setInterval(
-      async () => {
-        if (
-          !getAlwaysOnline()
-        ) {
-          await stopAlwaysOnline(
-            sock
-          )
-
-          return
-        }
-
-        try {
-          await sock.sendPresenceUpdate(
-            'available'
-          )
-        } catch {}
-      },
-      20000
-    )
-
-  if (
-    typeof alwaysOnlineTimer
-      ?.unref === 'function'
-  ) {
+  try { await sock.sendPresenceUpdate('available') } catch {}
+  alwaysOnlineTimer = setInterval(async () => {
+    if (!getAlwaysOnline()) {
+      await stopAlwaysOnline(sock)
+      return
+    }
+    try { await sock.sendPresenceUpdate('available') } catch {}
+  }, 20000)
+  if (typeof alwaysOnlineTimer?.unref === 'function') {
     alwaysOnlineTimer.unref()
   }
 }
 
-export async function stopAlwaysOnline(
-  sock
-) {
+export async function stopAlwaysOnline(sock) {
   if (alwaysOnlineTimer) {
-    clearInterval(
-      alwaysOnlineTimer
-    )
-
-    alwaysOnlineTimer =
-      null
+    clearInterval(alwaysOnlineTimer)
+    alwaysOnlineTimer = null
   }
-
   if (!sock) return
-
-  try {
-    await sock.sendPresenceUpdate(
-      'unavailable'
-    )
-  } catch {}
+  try { await sock.sendPresenceUpdate('unavailable') } catch {}
 }
 
 /*
@@ -391,54 +329,27 @@ export async function stopAlwaysOnline(
  * ==============================
  */
 
-function runMessageListeners(
-  messageListeners,
-  data
-) {
-  if (
-    !Array.isArray(
-      messageListeners
-    ) ||
-    !messageListeners.length
-  ) {
-    return
-  }
-
+function runMessageListeners(messageListeners, data) {
+  if (!Array.isArray(messageListeners) || !messageListeners.length) return
   Promise.allSettled(
-    messageListeners.map(
-      async listener => {
-        try {
-          if (
-            typeof listener.on ===
-            'function'
-          ) {
-            await listener.on(
-              data
-            )
-          } else if (
-            typeof listener.run ===
-            'function'
-          ) {
-            await listener.run(
-              data
-            )
-          }
-        } catch (error) {
-          console.error(
-            '[Listener Error]:',
-            error?.stack ||
-              error?.message ||
-              error
-          )
+    messageListeners.map(async listener => {
+      try {
+        if (typeof listener.on === 'function') {
+          await listener.on(data)
+        } else if (typeof listener.run === 'function') {
+          await listener.run(data)
         }
+      } catch (error) {
+        console.error(
+          '[Listener Error]:',
+          error?.stack || error?.message || error
+        )
       }
-    )
+    })
   ).catch(error => {
     console.error(
       '[Listener Runner Error]:',
-      error?.stack ||
-        error?.message ||
-        error
+      error?.stack || error?.message || error
     )
   })
 }
@@ -449,293 +360,107 @@ function runMessageListeners(
  * ==============================
  */
 
-export async function handleMessages(
-  update,
-  sock,
-  plugins,
-  messageListeners
-) {
-  // Allow both 'notify' and 'append' (Baileys 7.x delivers queued
-  // statuses via 'append' after a reconnect).
-  if (
-    update.type !== 'notify' &&
-    update.type !== 'append'
-  ) {
-    return
-  }
+export async function handleMessages(update, sock, plugins, messageListeners) {
+  if (update.type !== 'notify' && update.type !== 'append') return
 
-  if (
-    getAlwaysOnline() &&
-    !alwaysOnlineTimer
-  ) {
-    startAlwaysOnline(
-      sock
-    ).catch(error => {
-      console.error(
-        '[Always Online Error]:',
-        error?.message ||
-          error
-      )
+  if (getAlwaysOnline() && !alwaysOnlineTimer) {
+    startAlwaysOnline(sock).catch(error => {
+      console.error('[Always Online Error]:', error?.message || error)
     })
   }
 
-  for (
-    const message of
-    update.messages || []
-  ) {
+  for (const message of update.messages || []) {
     try {
-      if (
-        !message?.message
-      ) {
-        continue
-      }
+      if (!message?.message) continue
 
-      const rawJid =
-        message.key?.remoteJid ||
-        ''
+      const rawJid = message.key?.remoteJid || ''
 
       /*
-       * ─── NEW: skip autoread for view-once messages ───
-       * The autovv listener needs to download the media BEFORE a
-       * read receipt is sent — the receipt invalidates the
-       * view-once media key on WA's server side.
+       * ─── FIXED: deep view-once detection ───
+       * Previously only top-level viewOnce* wrappers were checked.
+       * VV wrapped in ephemeralMessage or groupStatusMessageV2 slipped
+       * through and autoread ran — invalidating the media key before
+       * the antivv listener could download it.
        */
-      const isViewOnce = !!(
-        message.message?.viewOnceMessage ||
-        message.message?.viewOnceMessageV2 ||
-        message.message?.viewOnceMessageV2Extension
-      )
+      const isViewOnce = isViewOnceDeep(message)
 
-      if (
-        getAutoRead() &&
-        message.key?.id &&
-        !isViewOnce
-      ) {
+      if (getAutoRead() && message.key?.id && !isViewOnce) {
         Promise.resolve(
-          sock.readMessages([
-            message.key
-          ])
+          sock.readMessages([message.key])
         ).catch(() => {})
       }
 
-      const isGroupStatusPost =
-        !!message
-          .message
-          ?.groupStatusMessageV2
-
-      const isStatus =
-        rawJid === 'status@broadcast'
-
-      const normalizedRemoteJid =
-        normalizeJid(
-          rawJid
-        )
-
-      const text =
-        getText(
-          message
-        )
-
-      const isGroupChat =
-        isGroup(
-          normalizedRemoteJid
-        ) ||
-        isGroupStatusPost
-
-      const isOwner =
-        checkIsOwner(
-          message,
-          sock
-        )
-
-      const activePrefix =
-        getPrefix()
+      const isGroupStatusPost = !!message.message?.groupStatusMessageV2
+      const isStatus = rawJid === 'status@broadcast'
+      const normalizedRemoteJid = normalizeJid(rawJid)
+      const text = getText(message)
+      const isGroupChat = isGroup(normalizedRemoteJid) || isGroupStatusPost
+      const isOwner = checkIsOwner(message, sock)
+      const activePrefix = getPrefix()
 
       /*
-       * ==============================
-       * RUN LISTENERS FIRST — before
-       * any message filtering, so
-       * statusview / autovv / antidelete
-       * see every message.
-       * ==============================
+       * Run listeners BEFORE any filtering so statusview / antivv /
+       * antidelete see every incoming message.
        */
+      runMessageListeners(messageListeners, {
+        sock,
+        message,
+        text,
+        isOwner,
+        isGroup: isGroupChat,
+        isStatus
+      })
 
-      runMessageListeners(
-        messageListeners,
-        {
-          sock,
-          message,
-          text,
-          isOwner,
-          isGroup:
-            isGroupChat,
-          isStatus
-        }
-      )
+      if (isStatus || isGroupStatusPost) continue
 
-      /*
-       * ==============================
-       * STATUS POSTS — command path only.
-       * Listeners above already ran.
-       * ==============================
-       */
+      if (!text || !text.startsWith(activePrefix)) continue
+      if (!isOwner) continue
 
-      if (
-        isStatus ||
-        isGroupStatusPost
-      ) {
-        continue
-      }
+      const body = text.slice(activePrefix.length).trim()
+      if (!body) continue
 
-      /*
-       * ==============================
-       * PREFIX CHECK
-       * ==============================
-       */
+      const parts = body.split(/\s+/)
+      const command = parts.shift().toLowerCase()
+      const args = parts
 
-      if (
-        !text ||
-        !text.startsWith(
-          activePrefix
-        )
-      ) {
-        continue
-      }
-
-      /*
-       * ==============================
-       * OWNER CHECK
-       * ==============================
-       */
-
-      if (!isOwner) {
-        continue
-      }
-
-      /*
-       * ==============================
-       * COMMAND PARSING
-       * ==============================
-       */
-
-      const body =
-        text
-          .slice(
-            activePrefix.length
-          )
-          .trim()
-
-      if (!body) {
-        continue
-      }
-
-      const parts =
-        body.split(/\s+/)
-
-      const command =
-        parts
-          .shift()
-          .toLowerCase()
-
-      const args =
-        parts
-
-      const plugin =
-        plugins.get(
-          command
-        )
-
-      if (!plugin) {
-        continue
-      }
+      const plugin = plugins.get(command)
+      if (!plugin) continue
 
       console.log(
-        `⚡ Executing: ${
-          activePrefix
-        }${command} from ${
-          senderNumber(
-            getSender(
-              message
-            )
-          )
-        }`
+        `⚡ Executing: ${activePrefix}${command} from ${senderNumber(getSender(message))}`
       )
 
-      /*
-       * ==============================
-       * REACTION
-       * ==============================
-       */
-
       try {
-        await sock.sendMessage(
-          rawJid,
-          {
-            react: {
-              text: '⏳',
-              key: message.key
-            }
-          }
-        )
-
-        setTimeout(
-          async () => {
-            try {
-              await sock.sendMessage(
-                rawJid,
-                {
-                  react: {
-                    text: '',
-                    key:
-                      message.key
-                  }
-                }
-              )
-            } catch {}
-          },
-          1000
-        )
+        await sock.sendMessage(rawJid, {
+          react: { text: '⏳', key: message.key }
+        })
+        setTimeout(async () => {
+          try {
+            await sock.sendMessage(rawJid, {
+              react: { text: '', key: message.key }
+            })
+          } catch {}
+        }, 1000)
       } catch {}
 
-      /*
-       * ==============================
-       * QUOTED MESSAGE
-       * ==============================
-       */
-
-      const quotedMessage =
-        getQuotedMessage(
-          message
-        )
-
-      /*
-       * ==============================
-       * EXECUTE COMMAND
-       * ==============================
-       */
+      const quotedMessage = getQuotedMessage(message)
 
       await plugin.run({
         sock,
         message,
         quotedMessage,
         args,
-        text:
-          args.join(' '),
+        text: args.join(' '),
         command,
-        prefix:
-          activePrefix,
+        prefix: activePrefix,
         isOwner,
-        isGroup:
-          isGroupChat,
+        isGroup: isGroupChat,
         plugins
       })
-
     } catch (error) {
       console.error(
         'Message handling error:',
-        error?.stack ||
-          error?.message ||
-          error
+        error?.stack || error?.message || error
       )
     }
   }
@@ -747,28 +472,15 @@ export async function handleMessages(
  * ==============================
  */
 
-export async function handleGroupParticipants(
-  update,
-  sock,
-  groupListeners
-) {
+export async function handleGroupParticipants(update, sock, groupListeners) {
   if (!update) return
-
-  for (
-    const listener of
-    groupListeners
-  ) {
+  for (const listener of groupListeners) {
     try {
-      await listener.run({
-        sock,
-        update
-      })
+      await listener.run({ sock, update })
     } catch (error) {
       console.error(
         '[Group Listener Error]:',
-        error?.stack ||
-          error?.message ||
-          error
+        error?.stack || error?.message || error
       )
     }
   }
