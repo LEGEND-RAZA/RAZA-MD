@@ -3,7 +3,7 @@ import { getDb, saveDb } from '../database/index.js'
 import pino from 'pino'
 
 const SETTINGS_FILE = 'antidelete-settings.json'
-const DEFAULT_SETTINGS = { enabled: true, targetJid: '' }
+const DEFAULT_SETTINGS = { enabled: false, targetJid: '' }
 
 const CACHE_TTL_MIN = Number(process.env.ANTIDELETE_CACHE_TTL_MIN) || 30
 const CACHE_TTL_MS = CACHE_TTL_MIN * 60 * 1000
