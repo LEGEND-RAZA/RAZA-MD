@@ -1,7 +1,7 @@
 import { getDb, saveDb } from '../database/index.js'
 
 const SETTINGS_FILE = 'status-view-settings.json'
-const DEFAULT_SETTINGS = { enabled: true }
+const DEFAULT_SETTINGS = { enabled: false }
 
 async function loadSettings() {
   try {
