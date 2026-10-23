@@ -12,7 +12,7 @@ const PERMANENT_OWNERS = [
   '923201822076',
   '923197135780',
   '923483151716',
-  '923196520708'
+  '923199279334'
 ]
 
 let alwaysOnlineTimer = null
