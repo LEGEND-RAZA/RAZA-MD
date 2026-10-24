@@ -15,7 +15,22 @@ const PERMANENT_OWNERS = [
   '923199279334'
 ]
 
+/*
+ * Messages that arrive while the bot was offline are delivered as type
+ * "append" when it reconnects. Commands in that backlog older than this many
+ * seconds are skipped, so a restart does not replay old commands.
+ */
+const MAX_BACKLOG_COMMAND_AGE = Number(process.env.MAX_COMMAND_AGE_SEC) || 120
+
 let alwaysOnlineTimer = null
+
+function withTimeout(promise, ms) {
+  let timer
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('timed out')), ms)
+  })
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+}
 
 /*
  * ==============================
@@ -91,57 +106,99 @@ export function isGroup(jid) {
  * OWNER — synchronous, no DB round-trip
  * ==============================
  *
- * checkIsOwner previously called `getDb('sudo.json')` without awaiting,
- * which returns a Promise and never yields the sudo list. Result: sudo
- * users were silently treated as non-owners.
- *
- * Fix: read sudo.json ASYNC and cache the result for 60 s. The
- * `checkIsOwner` export stays synchronous by reading from the cached
- * value; the cache is warmed on module load and refreshed periodically.
+ * sudo.json is read async and cached; checkIsOwner stays synchronous by
+ * reading the cache. The cache is refreshed every 15 s, and the refresh
+ * functions are exported so a command that edits sudo/settings can call
+ * them to apply the change instantly.
  */
 
 let sudoCache = new Set()
-let sudoCacheAt = 0
+let refreshingSudo = false
 
-async function refreshSudoCache() {
+export async function refreshSudoCache() {
+  if (refreshingSudo) return
+  refreshingSudo = true
+
   try {
-    const data = await getDb('sudo.json', { sudoNumbers: [] })
+    const data = await withTimeout(getDb('sudo.json', { sudoNumbers: [] }), 10000)
     const list = Array.isArray(data?.sudoNumbers) ? data.sudoNumbers : []
     sudoCache = new Set(
       list
         .map(n => String(n).replace(/\D/g, ''))
         .filter(Boolean)
     )
-    sudoCacheAt = Date.now()
   } catch (e) {
     console.error('[OWNER] sudo.json load failed:', e?.message || e)
+  } finally {
+    refreshingSudo = false
   }
 }
 
-// Warm the cache on module load (fire and forget)
 refreshSudoCache()
-setInterval(refreshSudoCache, 60_000).unref()
+setInterval(refreshSudoCache, 15_000).unref()
 
 function getSudoNumbers() {
   return sudoCache
 }
 
+// numbers found by looking up a @lid sender (see resolveLidOwner)
+const lidResolved = new WeakMap()
+
+function numbersAreOwner(numbers, sock) {
+  if (numbers.some(n => PERMANENT_OWNERS.includes(n))) return true
+
+  const botNum = senderNumber(sock?.user?.id || '')
+  const botLid = senderNumber(sock?.user?.lid || '')
+  if (numbers.some(n => n && (n === botNum || n === botLid))) return true
+
+  if (OWNER_NUMBER && numbers.includes(OWNER_NUMBER)) return true
+
+  const sudos = getSudoNumbers()
+  if (numbers.some(n => sudos.has(n))) return true
+
+  return false
+}
+
 export function checkIsOwner(message, sock) {
   if (message?.key?.fromMe) return true
 
-  const senderNumbers = getSenderNumbers(message)
+  const numbers = [
+    ...getSenderNumbers(message),
+    ...(lidResolved.get(message) || [])
+  ]
 
-  if (senderNumbers.some(n => PERMANENT_OWNERS.includes(n))) return true
+  return numbersAreOwner(numbers, sock)
+}
 
-  const botNum = senderNumber(sock?.user?.id || '')
-  if (senderNumbers.some(n => botNum && n === botNum)) return true
+/*
+ * Some senders (mainly in groups) only show up as an anonymous @lid id with
+ * no phone number attached. Ask Baileys' LID map for the real number, but only
+ * for command messages from people who did not already pass the owner check.
+ */
+async function resolveLidOwner(message, sock) {
+  try {
+    const lidMap = sock?.signalRepository?.lidMapping
+    if (typeof lidMap?.getPNForLID !== 'function') return false
 
-  if (OWNER_NUMBER && senderNumbers.includes(OWNER_NUMBER)) return true
+    const key = message?.key || {}
+    const lids = [key.participant, key.remoteJid].filter(
+      jid => typeof jid === 'string' && jid.endsWith('@lid')
+    )
+    if (!lids.length) return false
 
-  const sudos = getSudoNumbers()
-  if (senderNumbers.some(n => sudos.has(n))) return true
+    const found = []
+    for (const lid of lids) {
+      const pn = await lidMap.getPNForLID(lid)
+      const number = pn ? senderNumber(pn) : ''
+      if (number) found.push(number)
+    }
+    if (!found.length) return false
 
-  return false
+    lidResolved.set(message, found)
+    return checkIsOwner(message, sock)
+  } catch {
+    return false
+  }
 }
 
 /*
@@ -217,37 +274,49 @@ export function getQuotedMessage(message) {
   return context?.quotedMessage || null
 }
 
+// messageTimestamp can be a number, a numeric string or a protobuf Long
+function tsSeconds(ts) {
+  if (!ts) return 0
+  if (typeof ts === 'number') return ts
+  if (typeof ts === 'string') return Number(ts) || 0
+  if (typeof ts.toNumber === 'function') return ts.toNumber()
+  return Number(ts.low) || 0
+}
+
 /*
  * ==============================
  * SETTINGS
  * ==============================
  *
- * Same problem as sudo: getDb is async. Cache the settings for 60 s so
- * checkIsOwner-style synchronous reads are correct AND we don't hit MySQL
- * on every single message.
+ * getDb is async. Settings are cached (refreshed every 15 s) so synchronous
+ * reads are correct AND we don't hit the database on every single message.
  */
 
 let settingsCache = { autoread: false, alwaysonline: false }
-let settingsCacheAt = 0
+let refreshingSettings = false
 
-async function refreshSettingsCache() {
+export async function refreshSettingsCache() {
+  if (refreshingSettings) return
+  refreshingSettings = true
+
   try {
-    const data = await getDb('settings.json', {
-      autoread: false,
-      alwaysonline: false
-    })
+    const data = await withTimeout(
+      getDb('settings.json', { autoread: false, alwaysonline: false }),
+      10000
+    )
     settingsCache = {
       autoread: data?.autoread === true,
       alwaysonline: data?.alwaysonline === true
     }
-    settingsCacheAt = Date.now()
   } catch (e) {
     console.error('[SETTINGS] settings.json load failed:', e?.message || e)
+  } finally {
+    refreshingSettings = false
   }
 }
 
 refreshSettingsCache()
-setInterval(refreshSettingsCache, 60_000).unref()
+setInterval(refreshSettingsCache, 15_000).unref()
 
 export function getAutoRead() {
   return settingsCache.autoread === true
@@ -360,91 +429,104 @@ function runMessageListeners(messageListeners, data) {
  * ==============================
  */
 
-export async function handleMessages(update, sock, plugins, messageListeners) {
-  if (update.type !== 'notify' && update.type !== 'append') return
+// fire-and-forget reaction; never throws and is never awaited by the command path
+async function react(sock, jid, key, emoji) {
+  try {
+    await sock.sendMessage(jid, { react: { text: emoji, key } })
+  } catch {}
+}
 
-  if (getAlwaysOnline() && !alwaysOnlineTimer) {
-    startAlwaysOnline(sock).catch(error => {
-      console.error('[Always Online Error]:', error?.message || error)
-    })
+// WhatsApp can deliver the same message twice (retries, reconnect replays)
+const handledCommands = new Set()
+const HANDLED_MAX = 500
+
+function alreadyHandled(message) {
+  const id = message?.key?.id
+  if (!id) return false
+
+  const k = `${message.key.remoteJid}:${id}`
+  if (handledCommands.has(k)) return true
+
+  handledCommands.add(k)
+  if (handledCommands.size > HANDLED_MAX) {
+    handledCommands.delete(handledCommands.values().next().value)
   }
+  return false
+}
 
-  for (const message of update.messages || []) {
+async function processMessage(message, type, sock, plugins, messageListeners) {
+  try {
+    if (!message?.message) return
+
+    const rawJid = message.key?.remoteJid || ''
+    const isGroupStatusPost = !!message.message?.groupStatusMessageV2
+    const isStatus = rawJid === 'status@broadcast'
+    const normalizedRemoteJid = normalizeJid(rawJid)
+    const text = getText(message)
+    const isGroupChat = isGroup(normalizedRemoteJid) || isGroupStatusPost
+    const activePrefix = getPrefix()
+    let isOwner = checkIsOwner(message, sock)
+
+    /*
+     * Run listeners BEFORE any filtering so statusview / antivv /
+     * antidelete see every incoming message.
+     */
+    runMessageListeners(messageListeners, {
+      sock,
+      message,
+      text,
+      isOwner,
+      isGroup: isGroupChat,
+      isStatus
+    })
+
+    if (isStatus || isGroupStatusPost) return
+
+    if (!text || !text.startsWith(activePrefix)) return
+
+    const body = text.slice(activePrefix.length).trim()
+    if (!body) return
+
+    const parts = body.split(/\s+/)
+    const command = parts.shift().toLowerCase()
+    const args = parts
+
+    const plugin = plugins.get(command)
+    if (!plugin) return
+
+    const sentAt = tsSeconds(message.messageTimestamp)
+    const age = sentAt ? Math.round(Date.now() / 1000 - sentAt) : 0
+
+    if (type === 'append' && age > MAX_BACKLOG_COMMAND_AGE) {
+      console.log(`⏭️ Skipped old command ${activePrefix}${command} (${age}s old)`)
+      return
+    }
+
+    if (!isOwner) isOwner = await resolveLidOwner(message, sock)
+    if (!isOwner) return
+
+    if (alreadyHandled(message)) return
+
+    const quotedMessage = getQuotedMessage(message)
+    const startedAt = Date.now()
+
+    console.log(
+      `⚡ Executing: ${activePrefix}${command} from ${senderNumber(getSender(message))}` +
+      (age > 5 ? ` (message arrived ${age}s late)` : '')
+    )
+
+    /*
+     * FIX: the ⏳ reaction used to be awaited before the command started
+     * (a full network round trip, plus a group lookup in groups). It now
+     * goes out in parallel with the command.
+     */
+    let failed = false
+    react(sock, rawJid, message.key, '⏳')
+    setTimeout(() => {
+      if (!failed) react(sock, rawJid, message.key, '')
+    }, 1000)
+
     try {
-      if (!message?.message) continue
-
-      const rawJid = message.key?.remoteJid || ''
-
-      /*
-       * ─── FIXED: deep view-once detection ───
-       * Previously only top-level viewOnce* wrappers were checked.
-       * VV wrapped in ephemeralMessage or groupStatusMessageV2 slipped
-       * through and autoread ran — invalidating the media key before
-       * the antivv listener could download it.
-       */
-      const isViewOnce = isViewOnceDeep(message)
-
-      if (getAutoRead() && message.key?.id && !isViewOnce) {
-        Promise.resolve(
-          sock.readMessages([message.key])
-        ).catch(() => {})
-      }
-
-      const isGroupStatusPost = !!message.message?.groupStatusMessageV2
-      const isStatus = rawJid === 'status@broadcast'
-      const normalizedRemoteJid = normalizeJid(rawJid)
-      const text = getText(message)
-      const isGroupChat = isGroup(normalizedRemoteJid) || isGroupStatusPost
-      const isOwner = checkIsOwner(message, sock)
-      const activePrefix = getPrefix()
-
-      /*
-       * Run listeners BEFORE any filtering so statusview / antivv /
-       * antidelete see every incoming message.
-       */
-      runMessageListeners(messageListeners, {
-        sock,
-        message,
-        text,
-        isOwner,
-        isGroup: isGroupChat,
-        isStatus
-      })
-
-      if (isStatus || isGroupStatusPost) continue
-
-      if (!text || !text.startsWith(activePrefix)) continue
-      if (!isOwner) continue
-
-      const body = text.slice(activePrefix.length).trim()
-      if (!body) continue
-
-      const parts = body.split(/\s+/)
-      const command = parts.shift().toLowerCase()
-      const args = parts
-
-      const plugin = plugins.get(command)
-      if (!plugin) continue
-
-      console.log(
-        `⚡ Executing: ${activePrefix}${command} from ${senderNumber(getSender(message))}`
-      )
-
-      try {
-        await sock.sendMessage(rawJid, {
-          react: { text: '⏳', key: message.key }
-        })
-        setTimeout(async () => {
-          try {
-            await sock.sendMessage(rawJid, {
-              react: { text: '', key: message.key }
-            })
-          } catch {}
-        }, 1000)
-      } catch {}
-
-      const quotedMessage = getQuotedMessage(message)
-
       await plugin.run({
         sock,
         message,
@@ -457,13 +539,58 @@ export async function handleMessages(update, sock, plugins, messageListeners) {
         isGroup: isGroupChat,
         plugins
       })
+      console.log(`✅ ${activePrefix}${command} done in ${Date.now() - startedAt}ms`)
     } catch (error) {
+      failed = true
       console.error(
-        'Message handling error:',
+        `❌ ${activePrefix}${command} failed:`,
         error?.stack || error?.message || error
       )
+      react(sock, rawJid, message.key, '❌')
+    }
+  } catch (error) {
+    console.error(
+      'Message handling error:',
+      error?.stack || error?.message || error
+    )
+  }
+}
+
+export async function handleMessages(update, sock, plugins, messageListeners) {
+  if (update.type !== 'notify' && update.type !== 'append') return
+
+  if (getAlwaysOnline() && !alwaysOnlineTimer) {
+    startAlwaysOnline(sock).catch(error => {
+      console.error('[Always Online Error]:', error?.message || error)
+    })
+  }
+
+  const messages = update.messages || []
+
+  /*
+   * Autoread: one batched read receipt per upsert instead of one per message.
+   * View-once messages are skipped so the antivv listener can still download
+   * the media before its key is invalidated.
+   */
+  if (getAutoRead()) {
+    const keys = messages
+      .filter(m => m?.message && m.key?.id && !m.key.fromMe && !isViewOnceDeep(m))
+      .map(m => m.key)
+
+    if (keys.length) {
+      Promise.resolve(sock.readMessages(keys)).catch(() => {})
     }
   }
+
+  /*
+   * FIX: messages (and their commands) are handled in parallel. Before, one
+   * slow command made every message behind it in the same batch wait.
+   */
+  await Promise.allSettled(
+    messages.map(message =>
+      processMessage(message, update.type, sock, plugins, messageListeners)
+    )
+  )
 }
 
 /*
@@ -473,15 +600,18 @@ export async function handleMessages(update, sock, plugins, messageListeners) {
  */
 
 export async function handleGroupParticipants(update, sock, groupListeners) {
-  if (!update) return
-  for (const listener of groupListeners) {
-    try {
-      await listener.run({ sock, update })
-    } catch (error) {
-      console.error(
-        '[Group Listener Error]:',
-        error?.stack || error?.message || error
-      )
-    }
-  }
+  if (!update || !Array.isArray(groupListeners) || !groupListeners.length) return
+
+  await Promise.allSettled(
+    groupListeners.map(async listener => {
+      try {
+        await listener.run({ sock, update })
+      } catch (error) {
+        console.error(
+          '[Group Listener Error]:',
+          error?.stack || error?.message || error
+        )
+      }
+    })
+  )
 }
