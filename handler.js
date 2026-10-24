@@ -12,32 +12,10 @@ const PERMANENT_OWNERS = [
   '923201822076',
   '923197135780',
   '923483151716',
-  '923199279334'
+  '923196520708'
 ]
 
 let alwaysOnlineTimer = null
-
-/*
- * ==============================
- * FRESH-START FILTER
- * ==============================
- * Every time the socket opens, we record the timestamp. Any incoming
- * message whose own timestamp predates this connection (minus a small
- * grace window) is treated as an offline backlog message and SKIPPED.
- *
- * Grace window covers clock skew between WhatsApp servers and the
- * dyno, plus the small window between socket open and first message.
- */
-const STARTUP_GRACE_SEC = Number(process.env.BOT_STARTUP_GRACE_SEC) || 10
-let botConnectedAt = 0
-
-export function markConnected() {
-  botConnectedAt = Math.floor(Date.now() / 1000)
-  console.log(
-    `[HANDLER] Fresh-start marked at ${botConnectedAt} ` +
-    `(grace ${STARTUP_GRACE_SEC}s) — offline backlog will be ignored`
-  )
-}
 
 /*
  * ==============================
@@ -383,13 +361,7 @@ function runMessageListeners(messageListeners, data) {
  */
 
 export async function handleMessages(update, sock, plugins, messageListeners) {
-  /*
-   * ─── FIX #1 ───
-   * Accept ONLY 'notify'. 'append' is the offline backlog delivery type
-   * and 'prepend' is older history — both must be dropped so messages
-   * sent while the bot was off are NOT processed on restart.
-   */
-  if (update.type !== 'notify') return
+  if (update.type !== 'notify' && update.type !== 'append') return
 
   if (getAlwaysOnline() && !alwaysOnlineTimer) {
     startAlwaysOnline(sock).catch(error => {
@@ -400,24 +372,6 @@ export async function handleMessages(update, sock, plugins, messageListeners) {
   for (const message of update.messages || []) {
     try {
       if (!message?.message) continue
-
-      /*
-       * ─── FIX #2 ───
-       * Fresh-start timestamp guard. Even within 'notify', Baileys may
-       * redeliver very recent offline messages right after connect.
-       * Reject anything whose WhatsApp-side timestamp predates the
-       * connection moment (minus grace window).
-       */
-      if (botConnectedAt > 0) {
-        const msgTs = Number(message.messageTimestamp) || 0
-        if (msgTs > 0 && msgTs < botConnectedAt - STARTUP_GRACE_SEC) {
-          console.log(
-            `[HANDLER] skip stale message ` +
-            `(ts=${msgTs} < connected=${botConnectedAt})`
-          )
-          continue
-        }
-      }
 
       const rawJid = message.key?.remoteJid || ''
 
