@@ -49,6 +49,7 @@ export default {
 
       const targetJid = participant || jid
 
+      // 1. Delete the replied (quoted) message
       await sock.sendMessage(jid, {
         delete: {
           remoteJid: jid,
@@ -56,6 +57,11 @@ export default {
           id: stanzaId,
           participant: targetJid
         }
+      })
+
+      // 2. Delete the .dlt command message itself
+      await sock.sendMessage(jid, {
+        delete: message.key
       })
     } catch (error) {
       console.error('[DELETE] Error:', error?.message || error)
