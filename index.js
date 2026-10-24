@@ -23,8 +23,7 @@ import {
 import {
   handleMessages,
   handleGroupParticipants,
-  startAlwaysOnline,
-  markConnected
+  startAlwaysOnline
 } from './handler.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -345,9 +344,6 @@ async function connect() {
         console.log(`[WA] Message listeners: ${messageListeners.length}`)
         console.log(`[WA] Group listeners: ${groupListeners.length}`)
         console.log(`[WA] Setup hooks: ${setupHooks.length}`)
-
-        // ─── NEW: mark fresh-start point for offline-skip filter ───
-        markConnected()
 
         reconnecting = false
         badSessionRetries = 0
