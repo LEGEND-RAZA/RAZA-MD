@@ -1,4 +1,3 @@
-
 import { getDb, saveDb } from '../database/index.js'
 
 const DB_KEY = 'welcome.json'
@@ -24,11 +23,7 @@ function toSmallCaps(text) {
 }
 
 function defaultWelcomeText() {
-  return (
-    `👋 *${toSmallCaps('welcome to')}* &group\n\n` +
-    `📌 &mention\n\n` +
-    `_${toSmallCaps('powered by raza bot')}_`
-  )
+  return '&mention _WellCome_ 🌚🌷'
 }
 
 function normalizeJid(jid) {
