@@ -762,8 +762,7 @@ export default {
             text:
               `🚀 𝐒ᴛᴀʀᴛɪɴɢ 𝐔ᴘᴅᴀᴛᴇ...\n\n` +
               `𝐂ᴜʀʀᴇɴᴛ : ${currentSha ? currentSha.slice(0, 7) : 'Unknown'}\n` +
-              `𝐍ᴇᴡ : ${latestSha.slice(0, 7)}\n` +
-              `𝐑ᴇᴘᴏ : ${GITHUB_REPO}`
+              `𝐍ᴇᴡ : ${latestSha.slice(0, 7)}`
           },
           {
             quoted: message
