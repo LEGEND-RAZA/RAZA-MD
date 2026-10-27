@@ -3,32 +3,102 @@ import {
   saveDb
 } from '../database/index.js'
 
-const DB_KEY = 'alinks_settings'
+import {
+  prepareWAMessageMedia,
+  generateWAMessageFromContent,
+  jidNormalizedUser
+} from '@whiskeysockets/baileys'
 
+const DB_KEY = 'alinks_settings'
 const sentLinks = new Set()
 
 function loadSettings() {
-  return getDb(
-    DB_KEY,
-    {
-      targetJids: [],
-      customMsg: '',
-      enabled: false
-    }
-  )
+  return getDb(DB_KEY, {
+    targetJids: [],
+    customMsg: '',
+    enabled: false
+  })
 }
 
 function saveSettings(settings) {
-  return saveDb(
-    DB_KEY,
-    settings
-  )
+  return saveDb(DB_KEY, settings)
 }
 
 const delay = ms =>
-  new Promise(resolve =>
-    setTimeout(resolve, ms)
-  )
+  new Promise(resolve => setTimeout(resolve, ms))
+
+/*
+ * ==============================
+ * LINK PREVIEW BUILDER
+ * ==============================
+ * Builds the extendedTextMessage preview fields with the group's
+ * own DP, name, and description.
+ *
+ * Uses prepareWAMessageMedia to convert the DP into a small JPEG
+ * (the jpegThumbnail field WhatsApp expects for a preview card).
+ */
+async function buildPreviewThumb(sock, groupJid) {
+  if (!groupJid) return null
+  try {
+    const ppUrl = await sock.profilePictureUrl(groupJid, 'image')
+    if (!ppUrl) return null
+
+    const res = await fetch(ppUrl)
+    if (!res.ok) return null
+
+    const fullBuf = Buffer.from(await res.arrayBuffer())
+    const prepared = await prepareWAMessageMedia(
+      { image: fullBuf },
+      { upload: sock.waUploadToServer }
+    )
+    return prepared?.imageMessage?.jpegThumbnail || null
+  } catch (e) {
+    console.error('[ALINKS] preview thumb failed:', e?.message || e)
+    return null
+  }
+}
+
+/*
+ * Send an extendedTextMessage with a preserved preview card.
+ * Falls back to plain text if the raw send fails for any reason.
+ */
+async function sendLinkWithPreview(
+  sock,
+  targetJid,
+  text,
+  link,
+  groupName,
+  thumbBuf
+) {
+  const userJid = jidNormalizedUser(sock.user.id)
+
+  const ext = {
+    text,
+    matchedText: link,
+    canonicalUrl: link,
+    title: groupName,
+    description: `Invite to join "${groupName}"`,
+    previewType: 'NONE'
+  }
+  if (thumbBuf) ext.jpegThumbnail = thumbBuf
+
+  try {
+    const msg = generateWAMessageFromContent(
+      targetJid,
+      { extendedTextMessage: ext },
+      { userJid }
+    )
+    await sock.relayMessage(targetJid, msg.message, {
+      messageId: msg.key.id
+    })
+  } catch (e) {
+    console.error(
+      '[ALINKS] relay with preview failed, falling back:',
+      e?.message || e
+    )
+    await sock.sendMessage(targetJid, { text })
+  }
+}
 
 export default {
   command: 'alinks',
@@ -42,9 +112,7 @@ export default {
     args,
     isOwner
   }) {
-    const jid =
-      message?.key?.remoteJid
-
+    const jid = message?.key?.remoteJid
     if (!jid) return
 
     if (!isOwner) {
@@ -54,29 +122,14 @@ export default {
           text:
             '❌ ᴏɴʟʏ ᴛʜᴇ ʙᴏᴛ ᴏᴡɴᴇʀ ᴄᴀɴ ᴜsᴇ ᴛʜɪs ᴄᴏᴍᴍᴀɴᴅ.'
         },
-        {
-          quoted: message
-        }
+        { quoted: message }
       )
     }
 
-    const settings =
-      loadSettings()
-
-    const commandArgs =
-      Array.isArray(args)
-        ? args
-        : []
-
-    const cmd =
-      commandArgs.shift()
-        ?.trim()
-        .toLowerCase()
-
-    const value =
-      commandArgs
-        .join(' ')
-        .trim()
+    const settings = loadSettings()
+    const commandArgs = Array.isArray(args) ? args : []
+    const cmd = commandArgs.shift()?.trim().toLowerCase()
+    const value = commandArgs.join(' ').trim()
 
     if (!cmd || cmd === 'check') {
       return await sock.sendMessage(
@@ -100,43 +153,27 @@ export default {
 │
 ╰──────────────`
         },
-        {
-          quoted: message
-        }
+        { quoted: message }
       )
     }
 
     if (cmd === 'on') {
       settings.enabled = true
-
       saveSettings(settings)
-
       return await sock.sendMessage(
         jid,
-        {
-          text:
-            '✅ ᴀʟɪɴᴋs ʜᴀs ʙᴇᴇɴ ᴇɴᴀʙʟᴇᴅ.'
-        },
-        {
-          quoted: message
-        }
+        { text: '✅ ᴀʟɪɴᴋs ʜᴀs ʙᴇᴇɴ ᴇɴᴀʙʟᴇᴅ.' },
+        { quoted: message }
       )
     }
 
     if (cmd === 'off') {
       settings.enabled = false
-
       saveSettings(settings)
-
       return await sock.sendMessage(
         jid,
-        {
-          text:
-            '❌ ᴀʟɪɴᴋs ʜᴀs ʙᴇᴇɴ ᴅɪsᴀʙʟᴇᴅ.'
-        },
-        {
-          quoted: message
-        }
+        { text: '❌ ᴀʟɪɴᴋs ʜᴀs ʙᴇᴇɴ ᴅɪsᴀʙʟᴇᴅ.' },
+        { quoted: message }
       )
     }
 
@@ -144,97 +181,51 @@ export default {
       if (!value.includes('@')) {
         return await sock.sendMessage(
           jid,
-          {
-            text:
-              '❌ ɪɴᴠᴀʟɪᴅ ᴊɪᴅ.'
-          },
-          {
-            quoted: message
-          }
+          { text: '❌ ɪɴᴠᴀʟɪᴅ ᴊɪᴅ.' },
+          { quoted: message }
         )
       }
-
-      if (
-        !settings.targetJids.includes(
-          value
-        )
-      ) {
-        settings.targetJids.push(
-          value
-        )
-
+      if (!settings.targetJids.includes(value)) {
+        settings.targetJids.push(value)
         saveSettings(settings)
       }
-
       return await sock.sendMessage(
         jid,
-        {
-          text:
-            '✅ ᴊɪᴅ ᴀᴅᴅᴇᴅ ᴛᴏ ᴀʟɪɴᴋs.'
-        },
-        {
-          quoted: message
-        }
+        { text: '✅ ᴊɪᴅ ᴀᴅᴅᴇᴅ ᴛᴏ ᴀʟɪɴᴋs.' },
+        { quoted: message }
       )
     }
 
-    if (
-      cmd === 'del' ||
-      cmd === 'remove'
-    ) {
-      settings.targetJids =
-        settings.targetJids.filter(
-          target =>
-            target !== value
-        )
-
+    if (cmd === 'del' || cmd === 'remove') {
+      settings.targetJids = settings.targetJids.filter(
+        target => target !== value
+      )
       saveSettings(settings)
-
       return await sock.sendMessage(
         jid,
-        {
-          text:
-            '❌ ᴊɪᴅ ʀᴇᴍᴏᴠᴇᴅ ғʀᴏᴍ ᴀʟɪɴᴋs.'
-        },
-        {
-          quoted: message
-        }
+        { text: '❌ ᴊɪᴅ ʀᴇᴍᴏᴠᴇᴅ ғʀᴏᴍ ᴀʟɪɴᴋs.' },
+        { quoted: message }
       )
     }
 
     if (cmd === 'msg') {
-      settings.customMsg =
-        value
-
+      settings.customMsg = value
       saveSettings(settings)
-
       return await sock.sendMessage(
         jid,
-        {
-          text:
-            '✅ ᴀʟɪɴᴋs ᴍᴇssᴀɢᴇ ᴜᴘᴅᴀᴛᴇᴅ.'
-        },
-        {
-          quoted: message
-        }
+        { text: '✅ ᴀʟɪɴᴋs ᴍᴇssᴀɢᴇ ᴜᴘᴅᴀᴛᴇᴅ.' },
+        { quoted: message }
       )
     }
 
     if (cmd === 'clear') {
       settings.targetJids = []
       settings.customMsg = ''
-
       saveSettings(settings)
-
       return await sock.sendMessage(
         jid,
-        {
-          text:
-            '✅ ᴀʟɪɴᴋs sᴇᴛᴛɪɴɢs ᴄʟᴇᴀʀᴇᴅ.'
-        },
-        {
-          quoted: message
-        }
+        { text: '✅ ᴀʟɪɴᴋs sᴇᴛᴛɪɴɢs ᴄʟᴇᴀʀᴇᴅ.' },
+        { quoted: message }
       )
     }
 
@@ -258,9 +249,7 @@ export default {
 │
 ╰──────────────`
       },
-      {
-        quoted: message
-      }
+      { quoted: message }
     )
   }
 }
@@ -269,22 +258,11 @@ export const __alinks_listener = {
   on: 'text',
   fromMe: false,
 
-  async run({
-    sock,
-    message
-  }) {
+  async run({ sock, message }) {
     try {
-      const settings =
-        loadSettings()
-
+      const settings = loadSettings()
       if (!settings.enabled) return
-
-      if (
-        !settings.targetJids ||
-        !settings.targetJids.length
-      ) {
-        return
-      }
+      if (!settings.targetJids || !settings.targetJids.length) return
 
       const text =
         message?.text ||
@@ -298,191 +276,66 @@ export const __alinks_listener = {
       const regex =
         /https?:\/\/chat\.whatsapp\.com\/[0-9A-Za-z]+/gi
 
-      const matches =
-        text.match(regex)
-
+      const matches = text.match(regex)
       if (!matches) return
 
       await delay(1500)
 
       for (const link of matches) {
-        if (
-          sentLinks.has(link)
-        ) {
-          continue
-        }
+        if (sentLinks.has(link)) continue
 
-        const code =
-          link
-            .split('/')
-            .pop()
-
+        const code = link.split('/').pop()
         if (!code) continue
 
         try {
-          /*
-           * ==============================
-           * GET GROUP INFORMATION
-           * ==============================
-           */
+          const meta = await sock.groupGetInviteInfo(code)
+          const groupName = meta?.subject || 'WhatsApp Group'
+          const groupId = meta?.id
 
-          const meta =
-            await sock.groupGetInviteInfo(
-              code
+          // Fetch DP once, reuse across all targets
+          const thumbBuf = await buildPreviewThumb(sock, groupId)
+
+          const bodyText = settings.customMsg
+            ? `${settings.customMsg}\n${link}`
+            : link
+
+          for (const targetJid of settings.targetJids) {
+            await sendLinkWithPreview(
+              sock,
+              targetJid,
+              bodyText,
+              link,
+              groupName,
+              thumbBuf
             )
+          }
 
-          const groupName =
-            meta?.subject ||
-            'WhatsApp Group'
+          sentLinks.add(link)
+          if (sentLinks.size > 500) sentLinks.clear()
+        } catch (error) {
+          console.error(
+            '[ALINKS] group info failed, sending plain:',
+            error?.message || error
+          )
 
-          const groupId =
-            meta?.id
+          const bodyText = settings.customMsg
+            ? `${settings.customMsg}\n${link}`
+            : link
 
-          /*
-           * ==============================
-           * GET GROUP PROFILE PICTURE
-           * ==============================
-           */
-
-          let thumbBuffer = null
-
-          if (groupId) {
+          for (const targetJid of settings.targetJids) {
             try {
-              const ppUrl =
-                await sock.profilePictureUrl(
-                  groupId,
-                  'preview'
-                )
-
-              if (ppUrl) {
-                const response =
-                  await fetch(
-                    ppUrl
-                  )
-
-                if (response.ok) {
-                  thumbBuffer =
-                    Buffer.from(
-                      await response.arrayBuffer()
-                    )
-                }
-              }
+              await sock.sendMessage(targetJid, { text: bodyText })
             } catch {}
           }
 
-          /*
-           * ==============================
-           * SEND TO ALL TARGETS
-           * ==============================
-           */
-
-          for (
-            const targetJid
-            of settings.targetJids
-          ) {
-            const messageText =
-`${settings.customMsg || ''}
-${link}`
-
-            const content = {
-              text:
-                messageText,
-
-              linkPreview: {
-                'matched-text':
-                  link,
-
-                title:
-                  groupName,
-
-                description:
-                  `Invite to join "${groupName}"`,
-
-                previewType: 0,
-
-                ...(thumbBuffer
-                  ? {
-                      jpegThumbnail:
-                        thumbBuffer
-                    }
-                  : {})
-              },
-
-              externalAdReply: {
-                title:
-                  groupName,
-
-                body:
-                  `Invite to join "${groupName}"`,
-
-                mediaType: 1,
-
-                renderLargerThumbnail:
-                  true,
-
-                ...(thumbBuffer
-                  ? {
-                      thumbnail:
-                        thumbBuffer
-                    }
-                  : {}),
-
-                sourceUrl:
-                  link
-              }
-            }
-
-            await sock.sendMessage(
-              targetJid,
-              content
-            )
-          }
-
           sentLinks.add(link)
-
-          if (
-            sentLinks.size > 500
-          ) {
-            sentLinks.clear()
-          }
-
-        } catch (error) {
-
-          /*
-           * ==============================
-           * FALLBACK
-           * ==============================
-           */
-
-          for (
-            const targetJid
-            of settings.targetJids
-          ) {
-            await sock.sendMessage(
-              targetJid,
-              {
-                text:
-`${settings.customMsg || ''}
-${link}`
-              }
-            )
-          }
-
-          sentLinks.add(link)
-
-          if (
-            sentLinks.size > 500
-          ) {
-            sentLinks.clear()
-          }
+          if (sentLinks.size > 500) sentLinks.clear()
         }
       }
-
     } catch (error) {
-      console.log(
+      console.error(
         '[ALINKS]',
-        error?.message ||
-        error
+        error?.message || error
       )
     }
   }
