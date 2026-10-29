@@ -5,30 +5,57 @@ import {
   prepareWAMessageMedia
 } from '@whiskeysockets/baileys'
 
-/*
- * Extract preview metadata (title, description, matchedText, jpegThumbnail)
- * from a quoted message that itself had a link preview.
- */
-function extractQuotedPreview(quotedMessage) {
+function unwrap(m) {
+  let cur = m
+  for (let i = 0; i < 8; i++) {
+    const next =
+      cur?.ephemeralMessage?.message ||
+      cur?.viewOnceMessage?.message ||
+      cur?.viewOnceMessageV2?.message ||
+      cur?.viewOnceMessageV2Extension?.message ||
+      cur?.documentWithCaptionMessage?.message
+    if (!next || typeof next !== 'object') break
+    cur = next
+  }
+  return cur
+}
+
+function extractUrl(text) {
+  if (!text) return null
+  const m = String(text).match(/https?:\/\/[^\s]+/i)
+  return m ? m[0] : null
+}
+
+function extractFromQuoted(quotedMessage) {
   if (!quotedMessage) return null
-  const ext = quotedMessage.extendedTextMessage
-  if (!ext) return null
-  if (!ext.matchedText && !ext.title && !ext.jpegThumbnail) return null
+  const inner = unwrap(quotedMessage)
+  if (!inner) return null
+
+  const ext = inner.extendedTextMessage
+  const img = inner.imageMessage
+  const vid = inner.videoMessage
+
+  const textSources = [ext?.text, img?.caption, vid?.caption, inner.conversation]
+
+  let url = null
+  for (const t of textSources) {
+    url = extractUrl(t)
+    if (url) break
+  }
+  if (!url && ext?.matchedText) url = ext.matchedText
+  if (!url) return null
+
   return {
-    matchedText: ext.matchedText,
-    canonicalUrl: ext.canonicalUrl,
-    title: ext.title,
-    description: ext.description,
-    jpegThumbnail: ext.jpegThumbnail,
-    previewType: ext.previewType
+    url,
+    canonicalUrl: ext?.canonicalUrl,
+    title: ext?.title,
+    description: ext?.description,
+    jpegThumbnail: ext?.jpegThumbnail,
+    previewType: ext?.previewType
   }
 }
 
-/*
- * Fetch preview data for a WA group invite link (group name + DP).
- * For non-WA links, returns null — WhatsApp generates that preview itself.
- */
-async function fetchUrlPreview(sock, url) {
+async function fetchGroupPreview(sock, url) {
   const m = url.match(/chat\.whatsapp\.com\/([0-9A-Za-z]+)/i)
   if (!m) return null
 
@@ -64,38 +91,58 @@ async function fetchUrlPreview(sock, url) {
 
     return result
   } catch (e) {
-    console.error('[PAY] fetch preview failed:', e?.message || e)
+    console.error('[PAY] group preview failed:', e?.message || e)
     return null
   }
 }
 
-/*
- * Build the extendedTextMessage body for the payment note.
- * Priority: quoted preview > fetched WA-group preview > matchedText only.
- */
-async function buildNoteContent(sock, text, quotedPreview, url) {
-  const content = { text }
+async function buildNoteContent(sock, customText, quotedData) {
+  const customUrl = customText ? extractUrl(customText) : null
 
-  let preview = quotedPreview
-  if (!preview && url) {
-    preview = await fetchUrlPreview(sock, url)
+  let url = null
+  let previewSource = null
+
+  if (customUrl) {
+    url = customUrl
+    if (quotedData && quotedData.url === customUrl) {
+      previewSource = quotedData
+    }
+  } else if (quotedData) {
+    url = quotedData.url
+    previewSource = quotedData
   }
 
-  if (preview) {
-    if (preview.matchedText) content.matchedText = preview.matchedText
-    else if (url) content.matchedText = url
+  if (!url) {
+    return { text: customText || '' }
+  }
 
-    if (preview.canonicalUrl) content.canonicalUrl = preview.canonicalUrl
-    else if (url) content.canonicalUrl = url
+  let displayText = customText || ''
+  if (!displayText || !displayText.includes(url)) {
+    displayText = displayText ? `${displayText}\n${url}` : url
+  }
 
-    if (preview.title) content.title = preview.title
-    if (preview.description) content.description = preview.description
-    if (preview.jpegThumbnail) content.jpegThumbnail = preview.jpegThumbnail
-    if (preview.previewType) content.previewType = preview.previewType
-  } else if (url) {
-    // No custom preview data — let WhatsApp auto-generate from the URL
-    content.matchedText = url
-    content.canonicalUrl = url
+  const content = {
+    text: displayText,
+    matchedText: url,
+    canonicalUrl: previewSource?.canonicalUrl || url
+  }
+
+  if (
+    previewSource &&
+    (previewSource.title || previewSource.jpegThumbnail || previewSource.description)
+  ) {
+    if (previewSource.title) content.title = previewSource.title
+    if (previewSource.description) content.description = previewSource.description
+    if (previewSource.jpegThumbnail) content.jpegThumbnail = previewSource.jpegThumbnail
+    if (previewSource.previewType) content.previewType = previewSource.previewType
+  } else {
+    const fetched = await fetchGroupPreview(sock, url)
+    if (fetched) {
+      if (fetched.title) content.title = fetched.title
+      if (fetched.description) content.description = fetched.description
+      if (fetched.jpegThumbnail) content.jpegThumbnail = fetched.jpegThumbnail
+      if (fetched.previewType) content.previewType = fetched.previewType
+    }
   }
 
   return content
@@ -104,112 +151,136 @@ async function buildNoteContent(sock, text, quotedPreview, url) {
 export default {
   command: ['pay'],
   category: 'owner',
-  description: 'Send a fake payment request with note to all groups (HIGH BAN RISK)',
+  description: 'Send a fake payment request to all groups (reply to a link or pass text)',
 
   async run({ sock, message, args, isOwner, quotedMessage }) {
     const jid = message?.key?.remoteJid
     if (!jid) return
 
-    if (!isOwner) {
-      return sock.sendMessage(
+    try {
+      if (!isOwner) {
+        return sock.sendMessage(
+          jid,
+          { text: '❌ ᴏɴʟʏ ᴛʜᴇ ʙᴏᴛ ᴏᴡɴᴇʀ ᴄᴀɴ ᴜꜱᴇ ᴛʜɪꜱ ᴄᴏᴍᴍᴀɴᴅ.' },
+          { quoted: message }
+        )
+      }
+
+      const customText = String(args?.join(' ') || '').trim()
+      const quotedData = extractFromQuoted(quotedMessage)
+
+      if (!customText && !quotedData) {
+        return sock.sendMessage(
+          jid,
+          {
+            text:
+              'ᴜꜱᴀɢᴇ:\n\n' +
+              '• *.ᴘᴀʏ <ᴍᴇꜱꜱᴀɢᴇ>* → ᴛᴇxᴛ-ᴏɴʟʏ ᴘᴀʏᴍᴇɴᴛ ɴᴏᴛᴇ\n' +
+              '• *ʀᴇᴘʟʏ ᴛᴏ ᴀ ʟɪɴᴋ ᴡɪᴛʜ .ᴘᴀʏ* → ꜱᴇɴᴅ ʟɪɴᴋ + ᴏʀɪɢɪɴᴀʟ ᴘʀᴇᴠɪᴇᴡ\n' +
+              '• *ʀᴇᴘʟʏ ᴛᴏ ᴀ ʟɪɴᴋ ᴡɪᴛʜ .ᴘᴀʏ <ᴛᴇxᴛ>* → ᴄᴜꜱᴛᴏᴍ ᴛᴇxᴛ + ʟɪɴᴋ ᴘʀᴇᴠɪᴇᴡ'
+          },
+          { quoted: message }
+        )
+      }
+
+      const noteContent = await buildNoteContent(sock, customText, quotedData)
+
+      const groupsObj = await sock.groupFetchAllParticipating()
+      const groups = Object.values(groupsObj)
+
+      if (!groups.length) {
+        return sock.sendMessage(
+          jid,
+          { text: '❌ ɴᴏ ɢʀᴏᴜᴘꜱ ꜰᴏᴜɴᴅ.' },
+          { quoted: message }
+        )
+      }
+
+      const previewLabel = noteContent.title
+        ? `ᴡɪᴛʜ ᴘʀᴇᴠɪᴇᴡ: "${noteContent.title}"`
+        : noteContent.matchedText
+          ? 'ᴀᴜᴛᴏ-ɢᴇɴᴇʀᴀᴛᴇᴅ ᴘʀᴇᴠɪᴇᴡ'
+          : 'ᴛᴇxᴛ ᴏɴʟʏ'
+
+      await sock.sendMessage(
         jid,
-        { text: '❌ ᴏɴʟʏ ᴛʜᴇ ʙᴏᴛ ᴏᴡɴᴇʀ ᴄᴀɴ ᴜꜱᴇ ᴛʜɪꜱ ᴄᴏᴍᴍᴀɴᴅ.' },
+        {
+          text:
+            `📢 ꜱᴇɴᴅɪɴɢ ᴘᴀʏᴍᴇɴᴛ ʀᴇQᴜᴇꜱᴛ ᴛᴏ ${groups.length} ɢʀᴏᴜᴘꜱ...\n` +
+            `🖼️ ${previewLabel}`
+        },
         { quoted: message }
       )
-    }
 
-    const text = String(args?.join(' ') || '').trim()
-    if (!text) {
-      return sock.sendMessage(
-        jid,
-        { text: 'ᴜꜱᴀɢᴇ: .ᴘᴀʏ <ᴍᴇꜱꜱᴀɢᴇ>' },
-        { quoted: message }
-      )
-    }
+      let success = 0
+      let failed = 0
 
-    const urlMatch = text.match(/(https?:\/\/[^\s]+)/i)
-    const url = urlMatch?.[1] || null
+      for (const group of groups) {
+        try {
+          const participants = (group.participants || [])
+            .map(p => p.id)
+            .filter(Boolean)
 
-    const quotedPreview = extractQuotedPreview(quotedMessage)
-    const noteContent = await buildNoteContent(sock, text, quotedPreview, url)
-
-    const groupsObj = await sock.groupFetchAllParticipating()
-    const groups = Object.values(groupsObj)
-
-    if (!groups.length) {
-      return sock.sendMessage(
-        jid,
-        { text: '❌ ɴᴏ ɢʀᴏᴜᴘꜱ ꜰᴏᴜɴᴅ.' },
-        { quoted: message }
-      )
-    }
-
-    await sock.sendMessage(
-      jid,
-      { text: `📢 ꜱᴇɴᴅɪɴɢ ᴘᴀʏᴍᴇɴᴛ ʀᴇQᴜᴇꜱᴛ ᴛᴏ ${groups.length} ɢʀᴏᴜᴘꜱ...` },
-      { quoted: message }
-    )
-
-    let success = 0
-    let failed = 0
-
-    for (const group of groups) {
-      try {
-        const participants = (group.participants || [])
-          .map(p => p.id)
-          .filter(Boolean)
-
-        const payProto = {
-          requestPaymentMessage: {
-            currencyCodeIso4217: 'BRL',
-            amount1000: '0',
-            noteMessage: {
-              extendedTextMessage: {
-                ...noteContent,
-                contextInfo: { mentionedJid: participants }
+          const payProto = {
+            requestPaymentMessage: {
+              currencyCodeIso4217: 'BRL',
+              amount1000: '0',
+              noteMessage: {
+                extendedTextMessage: {
+                  ...noteContent,
+                  contextInfo: { mentionedJid: participants }
+                }
+              },
+              expiryTimestamp: '0',
+              amount: {
+                value: '0',
+                offset: 1000,
+                currencyCode: 'BRL'
               }
-            },
-            expiryTimestamp: '0',
-            amount: {
-              value: '0',
-              offset: 1000,
-              currencyCode: 'BRL'
             }
           }
+
+          const msg = generateWAMessageFromContent(
+            group.id,
+            proto.Message.fromObject(payProto),
+            { messageId: generateMessageID() }
+          )
+
+          await sock.relayMessage(group.id, msg.message, {
+            messageId: msg.key.id
+          })
+
+          success++
+          console.log(
+            `[PAY] ✓ ${group.id} | ${participants.length} mentions | ` +
+            `preview: ${noteContent.title || noteContent.matchedText || 'none'}`
+          )
+
+          await new Promise(r => setTimeout(r, 800))
+        } catch (e) {
+          failed++
+          console.error(`[PAY] ✗ ${group.id}:`, e?.message || e)
         }
-
-        const msg = generateWAMessageFromContent(
-          group.id,
-          proto.Message.fromObject(payProto),
-          { messageId: generateMessageID() }
-        )
-
-        await sock.relayMessage(group.id, msg.message, {
-          messageId: msg.key.id
-        })
-
-        success++
-        console.log(
-          `[PAY] Sent to ${group.id} (${participants.length} mentions)`
-        )
-
-        await new Promise(r => setTimeout(r, 800))
-      } catch (e) {
-        failed++
-        console.error(`[PAY] Failed ${group.id}:`, e?.message || e)
       }
-    }
 
-    await sock.sendMessage(
-      jid,
-      {
-        text:
-          `✅ ᴘᴀʏᴍᴇɴᴛ ʀᴇQᴜᴇꜱᴛ ꜱᴇɴᴛ\n\n` +
-          `📤 ꜱᴜᴄᴄᴇꜱꜱ: ${success}/${groups.length}\n` +
-          `❌ ꜰᴀɪʟᴇᴅ: ${failed}\n` +
-          `🖼️ ᴘʀᴇᴠɪᴇᴡ: ${noteContent.title ? 'ᴡɪᴛʜ ᴘʀᴇᴠɪᴇᴡ' : 'ᴛᴇxᴛ ᴏɴʟʏ'}`
-      },
-      { quoted: message }
-    )
+      await sock.sendMessage(
+        jid,
+        {
+          text:
+            `✅ ꜱᴜᴄᴄᴇꜱꜱ: ${success}/${groups.length}\n` +
+            `❌ ꜰᴀɪʟᴇᴅ: ${failed}`
+        },
+        { quoted: message }
+      )
+    } catch (e) {
+      console.error('[PAY] Command failed:', e?.stack || e?.message || e)
+      try {
+        await sock.sendMessage(
+          jid,
+          { text: `❌ ᴘᴀʏ ꜰᴀɪʟᴇᴅ\n\n${e?.message || e}` },
+          { quoted: message }
+        )
+      } catch {}
+    }
   }
 }
