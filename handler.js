@@ -9,7 +9,7 @@ const OWNER_NUMBER =
   (process.env.OWNER_NUMBER || '').replace(/\D/g, '')
 
 const PERMANENT_OWNERS = [
-  '923201822076',
+  '923493149939',
   '923197135780',
   '923483151716',
   '923199279334'
