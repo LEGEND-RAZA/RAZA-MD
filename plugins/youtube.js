@@ -3,29 +3,6 @@
  *
  *   .play <song name or YouTube link>     -> sends the song as audio
  *   .video <name or link> [360|480|720]   -> sends the video
- *
- * Put this file in your /plugins folder. Nothing to install.
- *
- * How it works
- *   1. Link -> used directly. Name -> searched on youtube.com (first result).
- *   2. Download links come from free public services, tried in order until one
- *      works: your own endpoint (optional) -> oceansaver -> siputzx -> yt-dlp
- *      (only if yt-dlp is installed on the server).
- *   3. The file is downloaded, size-checked, then sent to the chat.
- *
- * Free public APIs change or disappear without notice. If .play stops working,
- * add another endpoint with YT_API_MP3 / YT_API_MP4 (see CONFIG) instead of
- * editing code.
- *
- * Optional environment variables
- *   YT_MAX_MB          largest file to send, default 60
- *   YT_MAX_AUDIO_MIN   longest song, default 30 minutes
- *   YT_MAX_VIDEO_MIN   longest video, default 15 minutes
- *   YT_VIDEO_QUALITY   default video quality, 360 (smaller files = faster)
- *   YT_API_MP3 / YT_API_MP4   your own endpoint, e.g.
- *                      https://example.com/ytmp3?url={url}
- *   YT_OCEAN_KEY       replace the shared oceansaver key if it ever stops working
- *   YTDLP_PATH / YTDLP_COOKIES   yt-dlp binary / cookies.txt for the yt-dlp fallback
  */
 
 import { execFile } from 'node:child_process'
@@ -33,8 +10,18 @@ import { promisify } from 'node:util'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import ffmpegPath from 'ffmpeg-static'
+import youtubedl from 'youtube-dl-exec'
 
 const execFileAsync = promisify(execFile)
+
+// Automatically add ffmpeg-static to the system PATH so yt-dlp can find it
+if (ffmpegPath) {
+  process.env.PATH = `${path.dirname(ffmpegPath)}${path.delimiter}${process.env.PATH}`
+}
+
+// Get the exact path to the yt-dlp binary
+const YT_DLP_BINARY = youtubedl.constants?.YOUTUBE_DL_PATH || 'yt-dlp'
 
 const CFG = {
   maxMB: Number(process.env.YT_MAX_MB) || 60,
@@ -43,9 +30,11 @@ const CFG = {
   videoQuality: String(process.env.YT_VIDEO_QUALITY || '360'),
   customMp3: process.env.YT_API_MP3 || '',
   customMp4: process.env.YT_API_MP4 || '',
-  // shared key that the oceansaver web page itself uses; override if it stops working
-  oceanKey: process.env.YT_OCEAN_KEY || '30de256ad09118bd6b60a13de631ae2cea6e5f9d',
-  ytdlp: process.env.YTDLP_PATH || 'yt-dlp',
+  
+  // ✅ YOUR NEW API KEY IS SET HERE
+  oceanKey: process.env.YT_OCEAN_KEY || '2e89bf854cc249fad8d4c9ec29f7bd4965f69e52',
+  
+  ytdlp: process.env.YTDLP_PATH || YT_DLP_BINARY,
   cookies: process.env.YTDLP_COOKIES || '',
   parallel: Number(process.env.YT_PARALLEL) || 2
 }
@@ -60,7 +49,6 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 /* ---------- small helpers ---------- */
 
-// Only a few downloads at once so big files don't exhaust the server's memory.
 let active = 0
 const waiters = []
 
@@ -74,7 +62,7 @@ async function acquire() {
 
 function release() {
   const next = waiters.shift()
-  if (next) next() // hand the slot straight to the next waiter
+  if (next) next()
   else active--
 }
 
@@ -94,7 +82,6 @@ async function fetchText(url, timeoutMs, headers = {}) {
   return res.text()
 }
 
-// JSON if possible, otherwise the raw text (some APIs answer with a bare link)
 async function fetchJson(url, timeoutMs) {
   const text = await fetchText(url, timeoutMs, { Accept: 'application/json, */*' })
   try {
@@ -106,7 +93,6 @@ async function fetchJson(url, timeoutMs) {
 
 const IMAGE_URL = /\.(jpe?g|png|webp|gif)(\?|$)|ytimg\.com|googleusercontent\.com/i
 
-// Finds the download link inside whatever JSON shape an API returns.
 function pickUrl(data) {
   if (typeof data === 'string') {
     const t = data.trim()
@@ -191,7 +177,7 @@ function* walkObjects(node) {
 }
 
 function extractInitialData(html) {
-  for (const marker of ['var ytInitialData = ', 'window["ytInitialData"] = ']) {
+  for (const marker of ['var ytInitialData = ', 'window["ytInitialData"] = ', 'window.ytInitialData = ']) {
     const start = html.indexOf(marker)
     if (start === -1) continue
     const from = start + marker.length
@@ -207,13 +193,12 @@ async function searchYouTube(query) {
     `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}` +
     '&sp=EgIQAQ%253D%253D&hl=en&gl=US'
 
-  // the consent cookie stops the EU "before you continue" page
   const html = await fetchText(url, 12000, { Cookie: 'CONSENT=YES+1; SOCS=CAI' })
   const data = extractInitialData(html)
 
   for (const node of walkObjects(data)) {
     const v = node.videoRenderer
-    if (!v?.videoId || !v.lengthText) continue // no lengthText = live stream, skip
+    if (!v?.videoId || !v.lengthText) continue
 
     return {
       id: v.videoId,
@@ -237,8 +222,18 @@ async function lookupLink(id) {
     )
     info.title = meta?.title || ''
     info.channel = meta?.author_name || ''
+
+    const html = await fetchText(url, 8000, { Cookie: 'CONSENT=YES+1; SOCS=CAI' })
+    const match = html.match(/"lengthSeconds":"(\d+)"/)
+    if (match) {
+      info.seconds = parseInt(match[1], 10)
+      const h = Math.floor(info.seconds / 3600)
+      const m = Math.floor((info.seconds % 3600) / 60)
+      const s = info.seconds % 60
+      info.duration = `${h > 0 ? h + ':' : ''}${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+    }
   } catch {
-    // title is nice to have, not required
+    // title and duration are nice to have, not required
   }
   return info
 }
@@ -375,7 +370,7 @@ async function ytdlp(ctx) {
 
     const buffer = await fs.promises.readFile(path.join(dir, file))
     const ext = path.extname(file).slice(1).toLowerCase()
-    return { buffer, mimetype: MIME_BY_EXT[ext] }
+    return { buffer, mimetype: MIME_BY_EXT[ext] || 'audio/mpeg' }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }
@@ -426,7 +421,6 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
     query = (quotedMessage.conversation || quotedMessage.extendedTextMessage?.text || '').trim()
   }
 
-  // optional quality at the end: ".video despacito 720"
   let quality = CFG.videoQuality
   const words = query.split(/\s+/)
   const lastWord = words[words.length - 1]?.replace(/p$/i, '')
@@ -458,7 +452,6 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
     return reply(`❌ "${info.title}" is ${info.duration}. The limit is ${maxMin} minutes.`)
   }
 
-  // thumbnail card goes out while the file is being fetched
   const caption =
     `${kind === 'audio' ? '🎵' : '🎬'} *${info.title || 'YouTube'}*` +
     (info.channel ? `\n👤 ${info.channel}` : '') +
@@ -503,8 +496,26 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
   const name = safeName(title)
 
   if (kind === 'audio') {
-    const mimetype = media.type?.startsWith('audio/') ? media.type : 'audio/mpeg'
-    const ext = mimetype.includes('mp4') ? 'm4a' : 'mp3'
+    let mimetype = media.type || 'audio/mpeg'
+    let ext = 'mp3'
+    
+    if (mimetype.includes('mp4') || mimetype.includes('m4a')) {
+      mimetype = 'audio/mp4'
+      ext = 'm4a'
+    } else if (mimetype.includes('webm')) {
+      mimetype = 'audio/webm'
+      ext = 'webm'
+    } else if (mimetype.includes('ogg') || mimetype.includes('opus')) {
+      mimetype = 'audio/ogg'
+      ext = 'ogg'
+    } else if (mimetype.includes('mpeg') || mimetype.includes('mp3')) {
+      mimetype = 'audio/mpeg'
+      ext = 'mp3'
+    } else {
+      mimetype = 'audio/mpeg'
+      ext = 'mp3'
+    }
+
     await sock.sendMessage(
       jid,
       { audio: media.buffer, mimetype, fileName: `${name}.${ext}` },
