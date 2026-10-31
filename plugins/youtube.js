@@ -6,7 +6,18 @@ import { spawn } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import ffmpegPath from 'ffmpeg-static'
-import { Innertube, UniversalCache } from 'youtubei.js'
+import { Innertube, Platform, UniversalCache } from 'youtubei.js'
+
+/*
+ * FIX 1 — "No valid URL to decipher" / "Failed to extract signature
+ * decipher algorithm":
+ * Current youtubei.js does NOT ship its own JavaScript interpreter. To
+ * decipher stream URLs it hands YouTube's player code to
+ * Platform.shim.eval, and if you never set it, deciphering always fails
+ * (WEB client dies, and every retry re-parses the player = memory spike).
+ * Also run: npm i youtubei.js@latest
+ */
+Platform.shim.eval = async data => new Function(data.output)()
 
 const CFG = {
   maxMB: Number(process.env.YT_MAX_MB) || 60,
@@ -19,35 +30,21 @@ const CFG = {
 
 const QUALITIES = ['144', '240', '360', '480', '720', '1080']
 
-/*
- * NEW — fixes the OOM crash (Heroku R15):
- *
- * Innertube.create() has `cache: undefined` by default, which means every
- * single call re-fetches AND re-parses YouTube's player script from
- * scratch to extract its signature-decipher routine. With client fallback
- * creating a fresh instance per attempt (up to 4 for download, 1 for
- * search), a single command could trigger up to 5 of these from-scratch
- * parses — that's what spiked memory to 1.1GB and got the dyno killed.
- * One shared cache, reused across every create() call, fixes that.
- */
+// In-memory only (false) — Heroku's disk is ephemeral anyway.
 const PLAYER_CACHE = new UniversalCache(false)
 
 /*
  * Client-type fallback.
  *
- * youtubei.js emulates real YouTube clients (ANDROID, WEB, IOS, ...) and
- * YouTube periodically breaks one of them server-side (stale hardcoded
- * client version -> every call on that client, not just search, starts
- * 404ing), or the WEB client's signature-decipher extraction goes stale
- * when YouTube ships a new player (also fixed upstream regularly).
- * Hardcoding one client_type means the whole plugin goes down until
- * someone edits the code. Instead we try a short ordered list and
- * remember whichever one last worked.
+ * FIX 2 — default list changed from ANDROID,WEB,IOS,TV_EMBEDDED to
+ * WEB,ANDROID,TV. Your log showed IOS dying with a 404 (stale hardcoded
+ * client version) and TV_EMBEDDED with a 400 — they were only burning
+ * time and memory. WEB goes first because it works once the interpreter
+ * shim above is in place.
  *
- * Override the list with YT_CLIENT_TYPES="ANDROID,WEB,IOS" (comma separated)
- * if you want to change the order or add/remove a client.
+ * Override on Heroku with:  YT_CLIENT_TYPES="WEB,ANDROID,TV"
  */
-const CLIENT_TYPES = (process.env.YT_CLIENT_TYPES || 'ANDROID,WEB,IOS,TV_EMBEDDED')
+const CLIENT_TYPES = (process.env.YT_CLIENT_TYPES || 'WEB,ANDROID,TV')
   .split(',')
   .map(s => s.trim())
   .filter(Boolean)
@@ -56,18 +53,32 @@ let lastGoodSearchClient = null
 let lastGoodDownloadClient = null
 
 /*
- * retrievePlayer defaults to true (needed to decipher stream URLs for an
- * actual download). Search/metadata-only lookups pass false — deciphering
- * is never needed just to get a title or video ID, so skipping it avoids
- * paying for a full player fetch+parse on every search.
+ * FIX 3 — memory (Heroku R14/R15):
+ * Before, every attempt built a brand-new Innertube session (and loaded
+ * the player). Now one session per client type is created once and
+ * reused, and refreshed after an hour so it can't go stale.
+ * A failed create() is not kept, so the next call retries cleanly.
  */
-async function createInnertube(clientType, { retrievePlayer = true } = {}) {
-  return Innertube.create({
+const SESSION_TTL_MS = 60 * 60 * 1000
+const sessions = new Map()
+
+function createInnertube(clientType, { retrievePlayer = true } = {}) {
+  const key = `${clientType}:${retrievePlayer}`
+  const hit = sessions.get(key)
+  if (hit && Date.now() - hit.at < SESSION_TTL_MS) return hit.promise
+
+  const promise = Innertube.create({
     cookie: CFG.cookieString,
     client_type: clientType,
     cache: PLAYER_CACHE,
     retrieve_player: retrievePlayer
+  }).catch(error => {
+    sessions.delete(key)
+    throw error
   })
+
+  sessions.set(key, { promise, at: Date.now() })
+  return promise
 }
 
 function orderedClients(preferred) {
@@ -169,19 +180,11 @@ async function lookupLink(innertube, id) {
 /* ---------- downloader (youtubei.js) ---------- */
 
 /*
- * FIXED (earlier pass):
  * - getInfo() takes a bare video ID, never a URL.
- * - type: 'video' only matches video-ONLY formats (type is
- *   "video" | "audio" | "video+audio"). Switched to 'video+audio' so a
- *   combined stream is picked — this was why video downloads had no sound.
+ * - type: 'video+audio' picks a combined stream (video-only has no sound).
  * - quality strings must carry the 'p' suffix ("360p", not "360").
- *
- * Wrapped in the same client fallback as search, independently — a video
- * can search fine on one client but fail to download on it (streaming
- * URLs are gated differently per client than search is), so download gets
- * its own attempt order rather than reusing search's client. Player
- * retrieval is left at its default (true) here since deciphering is
- * actually needed for a real download, unlike the search step.
+ * - Each client gets its own attempt, since a video can search fine on one
+ *   client but fail to stream on it.
  */
 async function downloadWithYoutubeI(ctx) {
   let lastError
@@ -220,13 +223,9 @@ async function downloadWithYoutubeI(ctx) {
 }
 
 /*
- * FIXED: raw `.pipe()` does not forward stream errors or clean up the
- * destination on failure — if the source stream errored mid-download,
- * ffmpeg.stdin was left open forever, ffmpeg never exited, and the
- * surrounding promise (and the concurrency slot that holds) hung forever.
- * node:stream/promises `pipeline()` forwards errors and destroys both ends.
- * Also added: stderr capture for real error messages, and an output-size
- * cap so a mis-reported duration can't balloon memory usage.
+ * node:stream/promises `pipeline()` forwards errors and destroys both
+ * ends (raw `.pipe()` left ffmpeg hanging on a mid-download error).
+ * stderr is captured for real error messages, and output is size-capped.
  */
 async function downloadAudioAsMp3(webStream, signal) {
   if (!ffmpegPath) throw new Error('ffmpeg-static not found')
@@ -257,8 +256,8 @@ async function downloadAudioAsMp3(webStream, signal) {
     const source = Readable.fromWeb(webStream)
 
     const input = pipeline(source, ffmpeg.stdin).catch(err => {
-      // ffmpeg closing stdin early (e.g. after enough data) looks like an
-      // EPIPE / premature close on our end — that's not a real failure.
+      // ffmpeg closing stdin early looks like an EPIPE / premature close
+      // on our end — that's not a real failure.
       if (err?.code !== 'EPIPE' && err?.code !== 'ERR_STREAM_PREMATURE_CLOSE') throw err
     })
 
@@ -349,11 +348,8 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
   }
   if (!info) return reply(`❌ Nothing found.`)
 
-  /*
-   * FIXED: info.seconds is 0 for livestreams/premieres, and
-   * `0 && info.seconds > maxMin * 60` is falsy — the duration limit was
-   * silently skipped for exactly the content that can run unbounded.
-   */
+  // info.seconds is 0 for livestreams/premieres, which would silently skip
+  // the duration limit, so those are blocked outright.
   const maxMin = kind === 'audio' ? CFG.maxAudioMin : CFG.maxVideoMin
   if (!info.seconds) {
     return reply(`❌ Can't verify this video's length (likely a livestream/premiere) — blocked by the duration limit.`)
