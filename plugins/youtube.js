@@ -1,5 +1,5 @@
 /*
- * youtube.js: YouTube downloader (Cookie Only)
+ * youtube.js: YouTube downloader (Cookie Only with IOS Bypass)
  */
 
 import fs from 'node:fs'
@@ -14,7 +14,6 @@ const CFG = {
   maxAudioMin: Number(process.env.YT_MAX_AUDIO_MIN) || 30,
   maxVideoMin: Number(process.env.YT_MAX_VIDEO_MIN) || 15,
   videoQuality: String(process.env.YT_VIDEO_QUALITY || '360'),
-  // The code will ONLY use this cookie to download
   cookieString: process.env.YT_COOKIE || ''
 }
 
@@ -142,21 +141,23 @@ async function downloadWithCookie(ctx) {
     throw new Error('Missing YT_COOKIE. Please add it to your Environment Variables.')
   }
 
-  // 1. Parse the cookie string into the format ytdl-core needs
-  const cookies = CFG.cookieString.split(';').map(c => {
-    const [name, ...val] = c.trim().split('=')
-    return { name, value: val.join('=') }
-  })
-
-  // 2. Create the bypass agent
-  const agent = ytdl.createAgent(cookies)
+  // 1. Create the bypass agent directly from the string
+  const agent = ytdl.createAgent(CFG.cookieString)
 
   try {
-    // 3. Fetch video info using the agent
-    const info = await ytdl.getInfo(ctx.videoUrl, { agent })
+    // 2. Fetch video info using the agent AND force IOS/ANDROID clients
+    // IOS/ANDROID clients bypass the new SABR DRM streams that cause "No playable formats"
+    const info = await ytdl.getInfo(ctx.videoUrl, { 
+      agent,
+      playerClients: ['IOS', 'ANDROID'] 
+    })
+
+    if (!info.formats || info.formats.length === 0) {
+      throw new Error('No formats returned by YouTube. The cookie might be expired.')
+    }
 
     if (ctx.kind === 'audio') {
-      const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' })
+      const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio' })
       if (!format) throw new Error('No audio format available')
       
       const audioStream = ytdl.downloadFromInfo(info, { format, agent })
@@ -194,7 +195,6 @@ async function downloadWithCookie(ctx) {
       return { buffer, mimetype: 'video/mp4' }
     }
   } catch (e) {
-    // Catch bot check specifically to give a clear error
     if (e.message.includes('Sign in to confirm')) {
       throw new Error('Cookie is invalid or expired. Please update YT_COOKIE.')
     }
