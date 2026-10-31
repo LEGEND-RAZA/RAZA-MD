@@ -14,11 +14,63 @@ const CFG = {
   maxVideoMin: Number(process.env.YT_MAX_VIDEO_MIN) || 15,
   videoQuality: String(process.env.YT_VIDEO_QUALITY || '360'),
   cookieString: process.env.YT_COOKIE || '',
-  clientType: process.env.YT_CLIENT_TYPE || 'ANDROID',
   downloadTimeoutMs: Number(process.env.YT_DOWNLOAD_TIMEOUT_MS) || 180000
 }
 
 const QUALITIES = ['144', '240', '360', '480', '720', '1080']
+
+/*
+ * NEW: client-type fallback.
+ *
+ * youtubei.js emulates real YouTube clients (ANDROID, WEB, IOS, ...) and
+ * YouTube periodically breaks one of them server-side (stale hardcoded
+ * client version -> every call on that client, not just search, starts
+ * 404ing). Hardcoding a single client_type means the whole plugin goes
+ * down until someone edits the code. Instead we try a short ordered list
+ * and remember whichever one last worked.
+ *
+ * Override the list with YT_CLIENT_TYPES="ANDROID,WEB,IOS" (comma separated)
+ * if you want to change the order or add/remove a client.
+ */
+const CLIENT_TYPES = (process.env.YT_CLIENT_TYPES || 'ANDROID,WEB,IOS,TV_EMBEDDED')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean)
+
+let lastGoodSearchClient = null
+let lastGoodDownloadClient = null
+
+async function createInnertube(clientType) {
+  return Innertube.create({ cookie: CFG.cookieString, client_type: clientType })
+}
+
+function orderedClients(preferred) {
+  return preferred
+    ? [preferred, ...CLIENT_TYPES.filter(c => c !== preferred)]
+    : CLIENT_TYPES
+}
+
+/*
+ * Runs `task(innertube)` against each client in turn, stopping at the
+ * first one that doesn't throw. `task` may legitimately resolve to a
+ * falsy value (e.g. "no search results") — that still counts as the
+ * client working, so we don't burn through the whole list on a normal
+ * "nothing found" result.
+ */
+async function withClientFallback(preferred, task) {
+  let lastError
+  for (const clientType of orderedClients(preferred)) {
+    try {
+      const innertube = await createInnertube(clientType)
+      const result = await task(innertube)
+      return { result, clientType }
+    } catch (error) {
+      lastError = error
+      console.error(`[YouTube] client "${clientType}" failed:`, error?.message || error)
+    }
+  }
+  throw lastError || new Error('All YouTube client types failed')
+}
 
 /* ---------- helpers ---------- */
 
@@ -91,37 +143,56 @@ async function lookupLink(innertube, id) {
 /* ---------- downloader (youtubei.js) ---------- */
 
 /*
- * FIXED (#1, #2, #3):
- * - getInfo() takes a bare video ID, never a URL — pass ctx.id, not a
- *   constructed watch URL. (This was also a wasted duplicate fetch, since
- *   handle() already resolved the video once via lookupLink/searchYouTube.)
- * - type: 'video' only matches video-ONLY formats in youtubei.js
- *   (type is "video" | "audio" | "video+audio"). That produced silent
- *   video files. Switched to 'video+audio' so a combined stream is picked.
- * - quality strings must carry the 'p' suffix ("360p", not "360"), or
- *   chooseFormat never matches and silently falls through to 'best' only.
+ * FIXED (earlier pass):
+ * - getInfo() takes a bare video ID, never a URL.
+ * - type: 'video' only matches video-ONLY formats (type is
+ *   "video" | "audio" | "video+audio"). Switched to 'video+audio' so a
+ *   combined stream is picked — this was why video downloads had no sound.
+ * - quality strings must carry the 'p' suffix ("360p", not "360").
+ *
+ * NEW: wrapped in the same client fallback as search, independently —
+ * a video can search fine on one client but fail to download on it
+ * (streaming URLs are gated differently per client than search is), so
+ * download gets its own attempt order rather than reusing search's client.
  */
-async function downloadWithYoutubeI(innertube, ctx) {
-  const info = await innertube.getInfo(ctx.id)
+async function downloadWithYoutubeI(ctx) {
+  let lastError
+  for (const clientType of orderedClients(lastGoodDownloadClient)) {
+    try {
+      const innertube = await createInnertube(clientType)
+      const info = await innertube.getInfo(ctx.id)
 
-  if (ctx.kind === 'audio') {
-    const stream = await info.download({ type: 'audio', quality: 'best' })
-    return downloadAudioAsMp3(stream, ctx.signal)
+      let media
+      if (ctx.kind === 'audio') {
+        const stream = await info.download({ type: 'audio', quality: 'best' })
+        media = await downloadAudioAsMp3(stream, ctx.signal)
+      } else {
+        const wantedQuality = `${ctx.quality}p`
+        const format =
+          info.chooseFormat({ type: 'video+audio', quality: wantedQuality }) ||
+          info.chooseFormat({ type: 'video+audio', quality: 'best' })
+
+        if (!format) throw new Error('No combined video+audio format available for this video')
+
+        const stream = await info.download({ format })
+        media = await downloadVideo(stream, ctx.signal)
+      }
+
+      lastGoodDownloadClient = clientType
+      return media
+    } catch (error) {
+      lastError = error
+      console.error(`[YouTube] download via "${clientType}" failed:`, error?.message || error)
+      // Don't burn through the rest of the list for a file-size limit or an
+      // external timeout — every client will hit the same wall.
+      if (error?.tooBig || ctx.signal?.aborted) throw error
+    }
   }
-
-  const wantedQuality = `${ctx.quality}p`
-  const format =
-    info.chooseFormat({ type: 'video+audio', quality: wantedQuality }) ||
-    info.chooseFormat({ type: 'video+audio', quality: 'best' })
-
-  if (!format) throw new Error('No combined video+audio format available for this video')
-
-  const stream = await info.download({ format })
-  return downloadVideo(stream, ctx.signal)
+  throw lastError || new Error('All YouTube client types failed to download')
 }
 
 /*
- * FIXED (#5): raw `.pipe()` does not forward stream errors or clean up the
+ * FIXED: raw `.pipe()` does not forward stream errors or clean up the
  * destination on failure — if the source stream errored mid-download,
  * ffmpeg.stdin was left open forever, ffmpeg never exited, and the
  * surrounding promise (and the concurrency slot that holds) hung forever.
@@ -231,20 +302,16 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
 
   if (!query) return reply(`Example: ${prefix}${command} shape of you`)
 
-  let innertube
-  try {
-    innertube = await Innertube.create({
-      cookie: CFG.cookieString,
-      client_type: CFG.clientType
-    })
-  } catch (e) {
-    return reply(`❌ Failed to initialize YouTube.\n\n*Reason:*\n${e.message}`)
-  }
+  const id = extractVideoId(query)
 
   let info
-  const id = extractVideoId(query)
   try {
-    info = id ? await lookupLink(innertube, id) : await searchYouTube(innertube, query)
+    const outcome = await withClientFallback(
+      lastGoodSearchClient,
+      yt => (id ? lookupLink(yt, id) : searchYouTube(yt, query))
+    )
+    info = outcome.result
+    lastGoodSearchClient = outcome.clientType
   } catch (error) {
     console.error('Search failed:', error)
     return reply(`❌ YouTube search failed.\n\n*Reason:*\n${error.message}`)
@@ -252,7 +319,7 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
   if (!info) return reply(`❌ Nothing found.`)
 
   /*
-   * FIXED (#4): info.seconds is 0 for livestreams/premieres, and
+   * FIXED: info.seconds is 0 for livestreams/premieres, and
    * `0 && info.seconds > maxMin * 60` is falsy — the duration limit was
    * silently skipped for exactly the content that can run unbounded.
    */
@@ -272,7 +339,7 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
   await acquire()
   try {
     media = await withTimeout(
-      downloadWithYoutubeI(innertube, { ...ctx, signal: controller.signal }),
+      downloadWithYoutubeI({ ...ctx, signal: controller.signal }),
       CFG.downloadTimeoutMs,
       controller
     )
