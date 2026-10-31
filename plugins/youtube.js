@@ -14,9 +14,8 @@ const CFG = {
   maxAudioMin: Number(process.env.YT_MAX_AUDIO_MIN) || 30,
   maxVideoMin: Number(process.env.YT_MAX_VIDEO_MIN) || 15,
   videoQuality: String(process.env.YT_VIDEO_QUALITY || '360'),
-  // Optional: Add your YouTube cookie here if Cobalt API fails
+  // Read cookie from environment variable (DO NOT paste the cookie directly here)
   cookie: process.env.YT_COOKIE || '', 
-  oceanKey: process.env.YT_OCEAN_KEY || '2e89bf854cc249fad8d4c9ec29f7bd4965f69e52',
   parallel: Number(process.env.YT_PARALLEL) || 2
 }
 
@@ -197,66 +196,52 @@ async function lookupLink(id) {
 
 /* ---------- download providers ---------- */
 
-// 1. Cobalt API (Best free bypass for bot checks)
-async function cobaltApi(ctx) {
+// 1. Vevioz API (Highly reliable, no key needed)
+async function veviozApi(ctx) {
   try {
-    const res = await fetch('https://api.cobalt.tools/api/json', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({
-        url: ctx.videoUrl,
-        isAudioOnly: ctx.kind === 'audio',
-        aFormat: 'mp3',
-        vQuality: ctx.quality
-      })
-    })
-    const data = await res.json()
-    if (data.status === 'error') throw new Error(data.text)
-    if (!data.url) throw new Error('No URL returned')
-    return { url: data.url }
+    const type = ctx.kind === 'audio' ? 'mp3' : 'mp4'
+    const url = `https://api.vevioz.com/api/button/${type}/${ctx.id}`
+    const res = await fetch(url, { headers: { 'User-Agent': UA } })
+    const html = await res.text()
+    
+    // Vevioz returns an HTML page with a download button containing the URL
+    const match = html.match(/href="(https:\/\/[^"]+\.(?:mp3|mp4)[^"]*)"/i)
+    if (match && match[1]) {
+      return { url: match[1] }
+    }
+    throw new Error('No link found in response')
   } catch (e) {
     throw new Error(e.message)
   }
 }
 
-async function freeApis(ctx) {
-  const endpoints = ctx.kind === 'audio' ? [
-    `https://api.vreden.web.id/api/ytmp3?url=${encodeURIComponent(ctx.videoUrl)}`
-  ] : [
-    `https://api.vreden.web.id/api/ytmp4?url=${encodeURIComponent(ctx.videoUrl)}`
-  ]
-  let lastError
-  for (const url of endpoints) {
-    try {
-      const data = await fetchJson(url, 15000)
-      const downloadUrl = pickUrl(data)
-      if (downloadUrl) return { url: downloadUrl }
-      lastError = new Error('no link')
-    } catch (e) { lastError = e }
+// 2. Ryzendesu API (Backup)
+async function ryzendesuApi(ctx) {
+  try {
+    const type = ctx.kind === 'audio' ? 'ytmp3' : 'ytmp4'
+    const url = `https://api.ryzendesu.vip/api/downloader/${type}?url=${encodeURIComponent(ctx.videoUrl)}`
+    const data = await fetchJson(url, 15000)
+    const downloadUrl = pickUrl(data)
+    if (downloadUrl) return { url: downloadUrl }
+    throw new Error('No link in response')
+  } catch (e) {
+    throw new Error(e.message)
   }
-  throw lastError
 }
 
-// 2. Local Downloader (Bypasses bot check if YT_COOKIE is set)
+// 3. Local Downloader (Uses createAgent to bypass Bot Check)
 async function localDownloader(ctx) {
   try {
-    const options = {}
-    if (CFG.cookie) {
-      options.requestOptions = {
-        headers: {
-          cookie: CFG.cookie,
-          'User-Agent': UA
-        }
-      }
-    }
-
-    const info = await ytdl.getInfo(ctx.videoUrl, options)
+    // createAgent allows us to bypass the "Sign in to confirm you're not a bot" error
+    const agent = ytdl.createAgent()
+    
+    const info = await ytdl.getInfo(ctx.videoUrl, { agent })
     
     if (ctx.kind === 'audio') {
       const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' })
       if (!format) throw new Error('No audio format')
       
-      const audioStream = ytdl.downloadFromInfo(info, { format, requestOptions: options.requestOptions })
+      const audioStream = ytdl.downloadFromInfo(info, { format, agent })
       if (!ffmpegPath) throw new Error('ffmpeg-static not found')
       
       const ffmpeg = spawn(ffmpegPath, ['-i', 'pipe:0', '-vn', '-acodec', 'libmp3lame', '-f', 'mp3', 'pipe:1'])
@@ -277,7 +262,7 @@ async function localDownloader(ctx) {
       
       const buffer = await new Promise((resolve, reject) => {
         const chunks = []
-        const stream = ytdl.downloadFromInfo(info, { format, requestOptions: options.requestOptions })
+        const stream = ytdl.downloadFromInfo(info, { format, agent })
         let total = 0
         stream.on('data', chunk => {
           total += chunk.length
@@ -296,8 +281,8 @@ async function localDownloader(ctx) {
 
 function providers() {
   return [
-    { name: 'cobalt-api', fn: cobaltApi },
-    { name: 'free-apis', fn: freeApis },
+    { name: 'vevioz-api', fn: veviozApi },
+    { name: 'ryzendesu-api', fn: ryzendesuApi },
     { name: 'local-downloader', fn: localDownloader }
   ]
 }
