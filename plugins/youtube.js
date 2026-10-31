@@ -14,8 +14,8 @@ const CFG = {
   maxAudioMin: Number(process.env.YT_MAX_AUDIO_MIN) || 30,
   maxVideoMin: Number(process.env.YT_MAX_VIDEO_MIN) || 15,
   videoQuality: String(process.env.YT_VIDEO_QUALITY || '360'),
-  customMp3: process.env.YT_API_MP3 || '',
-  customMp4: process.env.YT_API_MP4 || '',
+  // Optional: Add your YouTube cookie here if Cobalt API fails
+  cookie: process.env.YT_COOKIE || '', 
   oceanKey: process.env.YT_OCEAN_KEY || '2e89bf854cc249fad8d4c9ec29f7bd4965f69e52',
   parallel: Number(process.env.YT_PARALLEL) || 2
 }
@@ -77,7 +77,6 @@ function pickUrl(data) {
     const t = data.trim()
     return /^https?:\/\/\S+$/i.test(t) ? t : null
   }
-
   const found = []
   const walk = (node, key) => {
     if (typeof node === 'string') {
@@ -89,7 +88,6 @@ function pickUrl(data) {
     }
   }
   walk(data, '')
-
   const preferred = ['download_url', 'downloadurl', 'dl', 'download', 'link', 'url', 'audio', 'video', 'mp3', 'mp4']
   for (const key of preferred) {
     const hit = found.find(f => f.key === key)
@@ -105,11 +103,8 @@ async function downloadBuffer(url, maxBytes) {
     signal: AbortSignal.timeout(180000)
   })
   if (!res.ok) throw new Error(`download HTTP ${res.status}`)
-
   const type = (res.headers.get('content-type') || '').toLowerCase()
-  if (type.includes('text/html') || type.includes('json')) {
-    throw new Error('link returned a web page instead of a file')
-  }
+  if (type.includes('text/html') || type.includes('json')) throw new Error('link returned a web page')
 
   const declared = Number(res.headers.get('content-length')) || 0
   if (declared > maxBytes) throw new TooBigError(declared)
@@ -121,7 +116,6 @@ async function downloadBuffer(url, maxBytes) {
     if (total > maxBytes) throw new TooBigError(total)
     chunks.push(chunk)
   }
-
   if (total < 10 * 1024) throw new Error('downloaded file is empty')
   return { buffer: Buffer.concat(chunks, total), type }
 }
@@ -167,11 +161,9 @@ async function searchYouTube(query) {
   const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&sp=EgIQAQ%253D%253D&hl=en&gl=US`
   const html = await fetchText(url, 12000, { Cookie: 'CONSENT=YES+1; SOCS=CAI' })
   const data = extractInitialData(html)
-
   for (const node of walkObjects(data)) {
     const v = node.videoRenderer
     if (!v?.videoId || !v.lengthText) continue
-
     return {
       id: v.videoId,
       title: v.title?.runs?.map(r => r.text).join('') || v.title?.simpleText || 'YouTube video',
@@ -190,7 +182,6 @@ async function lookupLink(id) {
     const meta = await fetchJson(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`, 6000)
     info.title = meta?.title || ''
     info.channel = meta?.author_name || ''
-
     const html = await fetchText(url, 8000, { Cookie: 'CONSENT=YES+1; SOCS=CAI' })
     const match = html.match(/"lengthSeconds":"(\d+)"/)
     if (match) {
@@ -206,154 +197,109 @@ async function lookupLink(id) {
 
 /* ---------- download providers ---------- */
 
-async function customApi(ctx) {
-  const template = ctx.kind === 'audio' ? CFG.customMp3 : CFG.customMp4
-  if (!template) throw new Error('not configured')
-  const data = await fetchJson(template.replace('{url}', encodeURIComponent(ctx.videoUrl)), 30000)
-  const url = pickUrl(data)
-  if (!url) throw new Error('no link in response')
-  return { url }
-}
-
-async function oceansaver(ctx) {
-  const formats = ctx.kind === 'audio' ? ['mp3'] : [ctx.quality, 'mp4']
-  let lastError
-
-  for (const format of formats) {
-    try {
-      const start = await fetchJson(
-        'https://p.oceansaver.in/ajax/download.php?copyright=0' +
-          `&format=${format}&url=${encodeURIComponent(ctx.videoUrl)}&api=${CFG.oceanKey}`,
-        20000
-      )
-      if (!start?.success || !start?.id) throw new Error(start?.message || 'request rejected')
-
-      const progressUrls = [
-        start.progress_url,
-        `https://p.oceansaver.in/ajax/progress.php?id=${start.id}`,
-        `https://p.oceansaver.in/api/progress?id=${start.id}`
-      ].filter(Boolean)
-
-      const deadline = Date.now() + 60000
-      while (Date.now() < deadline) {
-        await sleep(2000)
-        let progress = null
-        for (const u of progressUrls) {
-          try {
-            const data = await fetchJson(u, 15000)
-            if (data && typeof data === 'object') { progress = data; break }
-          } catch {}
-        }
-        if (!progress) continue
-        if (progress.download_url) return { url: progress.download_url, title: start.title }
-        if (progress.error) throw new Error(String(progress.error))
-      }
-      throw new Error('conversion took too long')
-    } catch (error) {
-      lastError = error
-    }
+// 1. Cobalt API (Best free bypass for bot checks)
+async function cobaltApi(ctx) {
+  try {
+    const res = await fetch('https://api.cobalt.tools/api/json', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({
+        url: ctx.videoUrl,
+        isAudioOnly: ctx.kind === 'audio',
+        aFormat: 'mp3',
+        vQuality: ctx.quality
+      })
+    })
+    const data = await res.json()
+    if (data.status === 'error') throw new Error(data.text)
+    if (!data.url) throw new Error('No URL returned')
+    return { url: data.url }
+  } catch (e) {
+    throw new Error(e.message)
   }
-  throw lastError
 }
 
 async function freeApis(ctx) {
   const endpoints = ctx.kind === 'audio' ? [
-    `https://api.vreden.web.id/api/ytmp3?url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.nexoracle.com/downloader/ytmp3?apikey=free&url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.ryzendesu.vip/api/downloader/ytmp3?url=${encodeURIComponent(ctx.videoUrl)}`
+    `https://api.vreden.web.id/api/ytmp3?url=${encodeURIComponent(ctx.videoUrl)}`
   ] : [
-    `https://api.vreden.web.id/api/ytmp4?url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.nexoracle.com/downloader/ytmp4?apikey=free&url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.ryzendesu.vip/api/downloader/ytmp4?url=${encodeURIComponent(ctx.videoUrl)}`
+    `https://api.vreden.web.id/api/ytmp4?url=${encodeURIComponent(ctx.videoUrl)}`
   ]
-
   let lastError
   for (const url of endpoints) {
     try {
       const data = await fetchJson(url, 15000)
       const downloadUrl = pickUrl(data)
-      if (downloadUrl) return { url: downloadUrl, title: data?.result?.title || data?.title }
-      lastError = new Error('no link in response')
-    } catch (e) {
-      lastError = e
-    }
+      if (downloadUrl) return { url: downloadUrl }
+      lastError = new Error('no link')
+    } catch (e) { lastError = e }
   }
   throw lastError
 }
 
-// 🚀 NEW FALLBACK: Pure JavaScript Downloader (No Python, No yt-dlp)
+// 2. Local Downloader (Bypasses bot check if YT_COOKIE is set)
 async function localDownloader(ctx) {
   try {
-    const info = await ytdl.getInfo(ctx.videoUrl)
+    const options = {}
+    if (CFG.cookie) {
+      options.requestOptions = {
+        headers: {
+          cookie: CFG.cookie,
+          'User-Agent': UA
+        }
+      }
+    }
+
+    const info = await ytdl.getInfo(ctx.videoUrl, options)
     
     if (ctx.kind === 'audio') {
       const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' })
-      if (!format) throw new Error('No audio format found')
-
-      const audioStream = ytdl.downloadFromInfo(info, { format })
+      if (!format) throw new Error('No audio format')
+      
+      const audioStream = ytdl.downloadFromInfo(info, { format, requestOptions: options.requestOptions })
       if (!ffmpegPath) throw new Error('ffmpeg-static not found')
       
-      const ffmpeg = spawn(ffmpegPath, [
-        '-i', 'pipe:0',
-        '-vn',
-        '-acodec', 'libmp3lame',
-        '-f', 'mp3',
-        'pipe:1'
-      ])
-
+      const ffmpeg = spawn(ffmpegPath, ['-i', 'pipe:0', '-vn', '-acodec', 'libmp3lame', '-f', 'mp3', 'pipe:1'])
       audioStream.pipe(ffmpeg.stdin)
 
       const chunks = []
       ffmpeg.stdout.on('data', chunk => chunks.push(chunk))
       
       await new Promise((resolve, reject) => {
-        ffmpeg.on('close', code => {
-          if (code === 0) resolve()
-          else reject(new Error(`ffmpeg exited with code ${code}`))
-        })
+        ffmpeg.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)))
         ffmpeg.on('error', reject)
         audioStream.on('error', reject)
       })
-
       return { buffer: Buffer.concat(chunks), mimetype: 'audio/mpeg' }
     } else {
-      const format = ytdl.chooseFormat(info.formats, { quality: `highestvideo[height<=${ctx.quality}]` }) || 
-                     ytdl.chooseFormat(info.formats, { quality: 'highest' })
-                     
-      if (!format) throw new Error('No video format found')
-
+      const format = ytdl.chooseFormat(info.formats, { quality: `highestvideo[height<=${ctx.quality}]` }) || ytdl.chooseFormat(info.formats, { quality: 'highest' })
+      if (!format) throw new Error('No video format')
+      
       const buffer = await new Promise((resolve, reject) => {
         const chunks = []
-        const stream = ytdl.downloadFromInfo(info, { format })
-        
+        const stream = ytdl.downloadFromInfo(info, { format, requestOptions: options.requestOptions })
         let total = 0
         stream.on('data', chunk => {
           total += chunk.length
-          if (total > CFG.maxMB * 1048576) {
-            stream.destroy()
-            reject(new TooBigError(total))
-            return
-          }
+          if (total > CFG.maxMB * 1048576) { stream.destroy(); reject(new TooBigError(total)); return }
           chunks.push(chunk)
         })
         stream.on('end', () => resolve(Buffer.concat(chunks)))
         stream.on('error', reject)
       })
-
       return { buffer, mimetype: 'video/mp4' }
     }
   } catch (e) {
-    throw new Error(`local-downloader: ${e.message}`)
+    throw new Error(e.message)
   }
 }
 
 function providers() {
-  const list = []
-  if (CFG.customMp3 || CFG.customMp4) list.push({ name: 'custom', fn: customApi })
-  list.push({ name: 'oceansaver', fn: oceansaver })
-  list.push({ name: 'free-apis', fn: freeApis })
-  list.push({ name: 'local-downloader', fn: localDownloader })
-  return list
+  return [
+    { name: 'cobalt-api', fn: cobaltApi },
+    { name: 'free-apis', fn: freeApis },
+    { name: 'local-downloader', fn: localDownloader }
+  ]
 }
 
 async function fetchMedia(ctx) {
@@ -365,10 +311,8 @@ async function fetchMedia(ctx) {
       log(`${ctx.kind} ${ctx.id}: trying ${provider.name}`)
       const result = await provider.fn(ctx)
       const file = result.buffer ? { buffer: result.buffer, type: result.mimetype || '' } : await downloadBuffer(result.url, maxBytes)
-      if (file.buffer.length > maxBytes) throw new TooBigError(file.buffer.length)
       return { ...file, title: result.title }
     } catch (error) {
-      if (error.tooBig) throw error
       failures.push(`${provider.name}: ${error.message}`)
       log(`${provider.name} failed: ${error.message}`)
     }
@@ -395,35 +339,21 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
     query = words.slice(0, -1).join(' ')
   }
 
-  if (!query) {
-    return reply(
-      kind === 'audio'
-        ? `🎵 Send a song name or link.\nExample: ${prefix}${command} shape of you`
-        : `🎬 Send a video name or link.\nExample: ${prefix}${command} shape of you 480`
-    )
-  }
+  if (!query) return reply(`Example: ${prefix}${command} shape of you`)
 
   let info
   const id = extractVideoId(query)
   try {
     info = id ? await lookupLink(id) : await searchYouTube(query)
   } catch (error) {
-    log('search failed:', error.message)
-    return reply('❌ YouTube search failed. Try again, or send the YouTube link directly.')
+    return reply('❌ YouTube search failed.')
   }
-  if (!info) return reply(`❌ Nothing found for "${query}".`)
+  if (!info) return reply(`❌ Nothing found.`)
 
   const maxMin = kind === 'audio' ? CFG.maxAudioMin : CFG.maxVideoMin
-  if (info.seconds && info.seconds > maxMin * 60) {
-    return reply(`❌ "${info.title}" is ${info.duration}. The limit is ${maxMin} minutes.`)
-  }
+  if (info.seconds && info.seconds > maxMin * 60) return reply(`❌ Limit is ${maxMin} minutes.`)
 
-  const caption =
-    `${kind === 'audio' ? '🎵' : '🎬'} *${info.title || 'YouTube'}*` +
-    (info.channel ? `\n👤 ${info.channel}` : '') +
-    (info.duration ? `\n⏱ ${info.duration}` : '') +
-    '\n\n⏳ Downloading...'
-
+  const caption = `${kind === 'audio' ? '🎵' : '🎬'} *${info.title}*\n\n⏳ Downloading...`
   const card = sock.sendMessage(jid, { image: { url: `https://i.ytimg.com/vi/${info.id}/hqdefault.jpg` }, caption }, { quoted: message }).catch(() => reply(caption).catch(() => {}))
 
   const ctx = { kind, id: info.id, quality, videoUrl: `https://www.youtube.com/watch?v=${info.id}` }
@@ -434,40 +364,24 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
     media = await fetchMedia(ctx)
   } catch (error) {
     await card
-    if (error.tooBig) {
-      return reply(`❌ That file is too big for WhatsApp (${error.message}, limit ${CFG.maxMB} MB).` + (kind === 'video' ? ' Try a lower quality, e.g. 240.' : ''))
-    }
-    console.error('[YT] all sources failed:', error.message)
     return reply(`❌ Download failed.\n\n*Errors:*\n${error.message}`)
   } finally {
     release()
   }
 
   await card
-  const title = media.title || info.title
-  const name = safeName(title)
+  const name = safeName(info.title)
 
   if (kind === 'audio') {
     let mimetype = media.type || 'audio/mpeg'
     let ext = 'mp3'
-    if (mimetype.includes('mp4') || mimetype.includes('m4a')) { mimetype = 'audio/mp4'; ext = 'm4a' }
-    else if (mimetype.includes('webm')) { mimetype = 'audio/webm'; ext = 'webm' }
-    else if (mimetype.includes('ogg') || mimetype.includes('opus')) { mimetype = 'audio/ogg'; ext = 'ogg' }
-
+    if (mimetype.includes('mp4')) { mimetype = 'audio/mp4'; ext = 'm4a' }
     await sock.sendMessage(jid, { audio: media.buffer, mimetype, fileName: `${name}.${ext}` }, { quoted: message })
   } else {
-    await sock.sendMessage(jid, { video: media.buffer, mimetype: 'video/mp4', fileName: `${name}.mp4`, caption: `🎬 ${title}` }, { quoted: message })
+    await sock.sendMessage(jid, { video: media.buffer, mimetype: 'video/mp4', fileName: `${name}.mp4`, caption: `🎬 ${info.title}` }, { quoted: message })
   }
 }
 
-export const playCommand = {
-  command: ['play', 'song', 'ytmp3', 'yta'],
-  run: ctx => handle('audio', ctx)
-}
-
-export const videoCommand = {
-  command: ['video', 'ytmp4', 'ytv'],
-  run: ctx => handle('video', ctx)
-}
-
+export const playCommand = { command: ['play', 'song', 'ytmp3', 'yta'], run: ctx => handle('audio', ctx) }
+export const videoCommand = { command: ['video', 'ytmp4', 'ytv'], run: ctx => handle('video', ctx) }
 export default playCommand
