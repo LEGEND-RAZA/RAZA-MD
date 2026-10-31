@@ -1,23 +1,23 @@
 /*
- * youtube.js: YouTube downloader (youtubei.js - Modern API)
+ * youtube.js: YouTube downloader (youtubei.js v18 API)
  */
 
 import { spawn } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import ffmpegPath from 'ffmpeg-static'
+import * as YTJS from 'youtubei.js'
 import { Innertube, Platform, UniversalCache } from 'youtubei.js'
 
 /*
- * FIX 1 — "No valid URL to decipher" / "Failed to extract signature
- * decipher algorithm":
- * Current youtubei.js does NOT ship its own JavaScript interpreter. To
- * decipher stream URLs it hands YouTube's player code to
- * Platform.shim.eval, and if you never set it, deciphering always fails
- * (WEB client dies, and every retry re-parses the player = memory spike).
- * Also run: npm i youtubei.js@latest
+ * youtubei.js has no built-in JavaScript interpreter; it needs this to
+ * decipher stream URLs.
  */
 Platform.shim.eval = async data => new Function(data.output)()
+
+// Hide the harmless "XYZ not found" parser warnings (they spam the logs
+// and cost memory). Real errors still print.
+try { YTJS.Log?.setLevel?.(YTJS.Log.Level.ERROR) } catch {}
 
 const CFG = {
   maxMB: Number(process.env.YT_MAX_MB) || 60,
@@ -30,56 +30,31 @@ const CFG = {
 
 const QUALITIES = ['144', '240', '360', '480', '720', '1080']
 
-// In-memory only (false) — Heroku's disk is ephemeral anyway.
 const PLAYER_CACHE = new UniversalCache(false)
 
 /*
- * Client-type fallback.
+ * In youtubei.js v18 the "client" is chosen PER REQUEST
+ * (getBasicInfo(id, { client })), not when the session is created.
+ * Valid names: IOS WEB MWEB ANDROID ANDROID_VR VISIONOS YTMUSIC
+ * YTMUSIC_ANDROID YTSTUDIO_ANDROID TV TV_SIMPLY TV_EMBEDDED YTKIDS
+ * WEB_EMBEDDED WEB_CREATOR
  *
- * FIX 2 — default list changed from ANDROID,WEB,IOS,TV_EMBEDDED to
- * WEB,ANDROID,TV. Your log showed IOS dying with a 404 (stale hardcoded
- * client version) and TV_EMBEDDED with a 400 — they were only burning
- * time and memory. WEB goes first because it works once the interpreter
- * shim above is in place.
- *
- * Override on Heroku with:  YT_CLIENT_TYPES="WEB,ANDROID,TV"
+ * Order matters on a server: ANDROID_VR and TV don't need a PO token, so
+ * they go first. Override on Heroku with YT_CLIENT_TYPES (or delete that
+ * config var to use this default).
  */
-const CLIENT_TYPES = (process.env.YT_CLIENT_TYPES || 'WEB,ANDROID,TV')
+const VALID_CLIENTS = new Set([
+  'IOS', 'WEB', 'MWEB', 'ANDROID', 'ANDROID_VR', 'VISIONOS', 'YTMUSIC',
+  'YTMUSIC_ANDROID', 'YTSTUDIO_ANDROID', 'TV', 'TV_SIMPLY', 'TV_EMBEDDED',
+  'YTKIDS', 'WEB_EMBEDDED', 'WEB_CREATOR'
+])
+
+const CLIENT_TYPES = (process.env.YT_CLIENT_TYPES || 'ANDROID_VR,TV,TV_EMBEDDED,WEB_EMBEDDED,IOS,ANDROID,WEB')
   .split(',')
-  .map(s => s.trim())
-  .filter(Boolean)
+  .map(s => s.trim().toUpperCase())
+  .filter(c => VALID_CLIENTS.has(c))
 
-let lastGoodSearchClient = null
-let lastGoodDownloadClient = null
-
-/*
- * FIX 3 — memory (Heroku R14/R15):
- * Before, every attempt built a brand-new Innertube session (and loaded
- * the player). Now one session per client type is created once and
- * reused, and refreshed after an hour so it can't go stale.
- * A failed create() is not kept, so the next call retries cleanly.
- */
-const SESSION_TTL_MS = 60 * 60 * 1000
-const sessions = new Map()
-
-function createInnertube(clientType, { retrievePlayer = true } = {}) {
-  const key = `${clientType}:${retrievePlayer}`
-  const hit = sessions.get(key)
-  if (hit && Date.now() - hit.at < SESSION_TTL_MS) return hit.promise
-
-  const promise = Innertube.create({
-    cookie: CFG.cookieString,
-    client_type: clientType,
-    cache: PLAYER_CACHE,
-    retrieve_player: retrievePlayer
-  }).catch(error => {
-    sessions.delete(key)
-    throw error
-  })
-
-  sessions.set(key, { promise, at: Date.now() })
-  return promise
-}
+let lastGoodClient = null
 
 function orderedClients(preferred) {
   return preferred
@@ -88,25 +63,45 @@ function orderedClients(preferred) {
 }
 
 /*
- * Runs `task(innertube)` against each client in turn, stopping at the
- * first one that doesn't throw. `task` may legitimately resolve to a
- * falsy value (e.g. "no search results") — that still counts as the
- * client working, so we don't burn through the whole list on a normal
- * "nothing found" result.
+ * ONE shared session (default WEB context) reused for everything, and
+ * refreshed hourly. This keeps memory low: the player script is parsed
+ * once instead of once per attempt.
  */
-async function withClientFallback(preferred, createOpts, task) {
-  let lastError
-  for (const clientType of orderedClients(preferred)) {
-    try {
-      const innertube = await createInnertube(clientType, createOpts)
-      const result = await task(innertube)
-      return { result, clientType }
-    } catch (error) {
-      lastError = error
-      console.error(`[YouTube] client "${clientType}" failed:`, error?.message || error)
-    }
+const SESSION_TTL_MS = 60 * 60 * 1000
+let session = null
+let sessionAt = 0
+
+async function getSession() {
+  if (session && Date.now() - sessionAt < SESSION_TTL_MS) return session
+
+  const pending = Innertube.create({
+    cache: PLAYER_CACHE,
+    ...(CFG.cookieString ? { cookie: CFG.cookieString } : {})
+  })
+  session = pending
+  sessionAt = Date.now()
+
+  try {
+    return await pending
+  } catch (error) {
+    if (session === pending) session = null
+    throw error
   }
-  throw lastError || new Error('All YouTube client types failed')
+}
+
+/*
+ * getBasicInfo only calls the /player endpoint (getInfo also calls /next,
+ * which several clients reject with 400/404), and we check playability so
+ * "login required" etc. moves on to the next client.
+ */
+async function getPlayableInfo(yt, id, client) {
+  const info = await yt.getBasicInfo(id, { client })
+  const status = info.playability_status?.status
+  if (status && status !== 'OK') {
+    throw new Error(info.playability_status?.reason || status)
+  }
+  if (!info.streaming_data) throw new Error('no streaming data returned')
+  return info
 }
 
 /* ---------- helpers ---------- */
@@ -153,8 +148,8 @@ function extractVideoId(text) {
   return String(text || '').match(YT_URL)?.[1] || null
 }
 
-async function searchYouTube(innertube, query) {
-  const search = await innertube.search(query)
+async function searchYouTube(yt, query) {
+  const search = await yt.search(query)
   const videos = search.videos || []
   if (videos.length === 0) return null
   const video = videos[0]
@@ -167,66 +162,70 @@ async function searchYouTube(innertube, query) {
   }
 }
 
-async function lookupLink(innertube, id) {
-  const info = await innertube.getInfo(id)
-  return {
-    id,
-    title: info.basic_info.title || 'YouTube video',
-    duration: info.basic_info.duration ? new Date(info.basic_info.duration * 1000).toISOString().substr(14, 5) : '',
-    seconds: info.basic_info.duration || 0
+async function lookupLink(yt, id) {
+  let lastError
+  for (const client of orderedClients(lastGoodClient)) {
+    try {
+      const info = await getPlayableInfo(yt, id, client)
+      lastGoodClient = client
+      const seconds = info.basic_info?.duration || 0
+      return {
+        id,
+        title: info.basic_info?.title || 'YouTube video',
+        duration: seconds ? new Date(seconds * 1000).toISOString().substr(14, 5) : '',
+        seconds
+      }
+    } catch (error) {
+      lastError = error
+      console.error(`[YouTube] lookup via "${client}" failed:`, error?.message || error)
+    }
   }
+  throw lastError || new Error('All YouTube clients failed')
 }
 
-/* ---------- downloader (youtubei.js) ---------- */
+/* ---------- downloader ---------- */
 
-/*
- * - getInfo() takes a bare video ID, never a URL.
- * - type: 'video+audio' picks a combined stream (video-only has no sound).
- * - quality strings must carry the 'p' suffix ("360p", not "360").
- * - Each client gets its own attempt, since a video can search fine on one
- *   client but fail to stream on it.
- */
-async function downloadWithYoutubeI(ctx) {
-  let lastError
-  for (const clientType of orderedClients(lastGoodDownloadClient)) {
+function pickVideoFormat(info, quality) {
+  // chooseFormat THROWS when nothing matches, so try the wanted quality
+  // first and then "best".
+  for (const q of [`${quality}p`, 'best']) {
     try {
-      const innertube = await createInnertube(clientType)
-      const info = await innertube.getInfo(ctx.id)
+      return info.chooseFormat({ type: 'video+audio', quality: q })
+    } catch {}
+  }
+  throw new Error('No combined video+audio format available for this video')
+}
+
+async function downloadWithYoutubeI(ctx) {
+  const yt = await getSession()
+  let lastError
+
+  for (const client of orderedClients(lastGoodClient)) {
+    try {
+      const info = await getPlayableInfo(yt, ctx.id, client)
 
       let media
       if (ctx.kind === 'audio') {
-        const stream = await info.download({ type: 'audio', quality: 'best' })
+        const stream = await info.download({ type: 'audio', quality: 'best', client })
         media = await downloadAudioAsMp3(stream, ctx.signal)
       } else {
-        const wantedQuality = `${ctx.quality}p`
-        const format =
-          info.chooseFormat({ type: 'video+audio', quality: wantedQuality }) ||
-          info.chooseFormat({ type: 'video+audio', quality: 'best' })
-
-        if (!format) throw new Error('No combined video+audio format available for this video')
-
-        const stream = await info.download({ format })
+        const format = pickVideoFormat(info, ctx.quality)
+        const stream = await info.download({ format, client })
         media = await downloadVideo(stream, ctx.signal)
       }
 
-      lastGoodDownloadClient = clientType
+      lastGoodClient = client
       return media
     } catch (error) {
       lastError = error
-      console.error(`[YouTube] download via "${clientType}" failed:`, error?.message || error)
-      // Don't burn through the rest of the list for a file-size limit or an
-      // external timeout — every client will hit the same wall.
+      console.error(`[YouTube] download via "${client}" failed:`, error?.message || error)
+      // A size limit or an external timeout will hit every client the same.
       if (error?.tooBig || ctx.signal?.aborted) throw error
     }
   }
-  throw lastError || new Error('All YouTube client types failed to download')
+  throw lastError || new Error('All YouTube clients failed to download')
 }
 
-/*
- * node:stream/promises `pipeline()` forwards errors and destroys both
- * ends (raw `.pipe()` left ffmpeg hanging on a mid-download error).
- * stderr is captured for real error messages, and output is size-capped.
- */
 async function downloadAudioAsMp3(webStream, signal) {
   if (!ffmpegPath) throw new Error('ffmpeg-static not found')
 
@@ -256,8 +255,6 @@ async function downloadAudioAsMp3(webStream, signal) {
     const source = Readable.fromWeb(webStream)
 
     const input = pipeline(source, ffmpeg.stdin).catch(err => {
-      // ffmpeg closing stdin early looks like an EPIPE / premature close
-      // on our end — that's not a real failure.
       if (err?.code !== 'EPIPE' && err?.code !== 'ERR_STREAM_PREMATURE_CLOSE') throw err
     })
 
@@ -333,15 +330,8 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
 
   let info
   try {
-    // retrievePlayer: false — this step only needs a title/duration/id,
-    // never deciphering, so skip the expensive player fetch+parse here.
-    const outcome = await withClientFallback(
-      lastGoodSearchClient,
-      { retrievePlayer: false },
-      yt => (id ? lookupLink(yt, id) : searchYouTube(yt, query))
-    )
-    info = outcome.result
-    lastGoodSearchClient = outcome.clientType
+    const yt = await getSession()
+    info = id ? await lookupLink(yt, id) : await searchYouTube(yt, query)
   } catch (error) {
     console.error('Search failed:', error)
     return reply(`❌ YouTube search failed.\n\n*Reason:*\n${error.message}`)
