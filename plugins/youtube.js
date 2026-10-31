@@ -151,7 +151,7 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
   try {
     innertube = await Innertube.create({
       cookie: CFG.cookieString,
-      client_type: 'TV' // TV client is highly reliable for bypassing blocks
+      client_type: 'ANDROID' // ✅ Switched to ANDROID for reliable searching
     })
   } catch (e) {
     return reply(`❌ Failed to initialize YouTube.\n\n*Reason:*\n${e.message}`)
