@@ -6,6 +6,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
+import { Readable } from 'node:stream'
 import ffmpegPath from 'ffmpeg-static'
 import { Innertube } from 'youtubei.js'
 
@@ -17,7 +18,6 @@ const CFG = {
   cookieString: process.env.YT_COOKIE || ''
 }
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
 const QUALITIES = ['144', '240', '360', '480', '720', '1080']
 
 /* ---------- helpers ---------- */
@@ -54,9 +54,11 @@ function extractVideoId(text) {
 }
 
 async function searchYouTube(innertube, query) {
-  const search = await innertube.search(query, { type: 'video' })
-  const video = search.videos[0]
-  if (!video) return null
+  const search = await innertube.search(query)
+  const videos = search.videos || []
+  if (videos.length === 0) return null
+  const video = videos[0]
+  
   return {
     id: video.video_id,
     title: video.title?.toString() || 'YouTube video',
@@ -77,25 +79,15 @@ async function lookupLink(innertube, id) {
 
 /* ---------- downloader (youtubei.js) ---------- */
 
-async function downloadWithYoutubeI(ctx) {
-  const innertube = await Innertube.create({
-    cookie: CFG.cookieString,
-    client_type: 'WEB_CREATOR' // Bypasses most bot checks
-  })
-
+async function downloadWithYoutubeI(innertube, ctx) {
   const info = await innertube.getInfo(ctx.videoUrl)
 
   if (ctx.kind === 'audio') {
-    // Download the best audio stream
     const stream = await info.download({ type: 'audio', quality: 'best' })
     
     if (!ffmpegPath) throw new Error('ffmpeg-static not found')
     
-    // Convert to MP3 on the fly using ffmpeg
     const ffmpeg = spawn(ffmpegPath, ['-i', 'pipe:0', '-vn', '-acodec', 'libmp3lame', '-f', 'mp3', 'pipe:1'])
-    
-    // Convert Web ReadableStream to Node stream and pipe
-    const { Readable } = await import('node:stream')
     Readable.fromWeb(stream).pipe(ffmpeg.stdin)
 
     const chunks = []
@@ -108,10 +100,7 @@ async function downloadWithYoutubeI(ctx) {
     return { buffer: Buffer.concat(chunks), mimetype: 'audio/mpeg' }
 
   } else {
-    // Download video (MP4)
-    const format = info.chooseFormat({ type: 'video', quality: ctx.quality, format: 'mp4' }) || 
-                   info.chooseFormat({ type: 'video', quality: 'best', format: 'mp4' })
-    
+    const format = info.chooseFormat({ type: 'video', quality: ctx.quality }) || info.chooseFormat({ type: 'video', quality: 'best' })
     if (!format) throw new Error('No video format available')
 
     const stream = await info.download({ format })
@@ -119,7 +108,6 @@ async function downloadWithYoutubeI(ctx) {
     const buffer = await new Promise((resolve, reject) => {
       const chunks = []
       let total = 0
-      
       const readable = Readable.fromWeb(stream)
       
       readable.on('data', chunk => {
@@ -159,19 +147,23 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
 
   if (!query) return reply(`Example: ${prefix}${command} shape of you`)
 
-  // Initialize Innertube for searching/metadata
-  const innertube = await Innertube.create({
-    cookie: CFG.cookieString,
-    client_type: 'WEB_CREATOR'
-  })
+  let innertube
+  try {
+    innertube = await Innertube.create({
+      cookie: CFG.cookieString,
+      client_type: 'TV' // TV client is highly reliable for bypassing blocks
+    })
+  } catch (e) {
+    return reply(`❌ Failed to initialize YouTube.\n\n*Reason:*\n${e.message}`)
+  }
 
   let info
   const id = extractVideoId(query)
   try {
     info = id ? await lookupLink(innertube, id) : await searchYouTube(innertube, query)
   } catch (error) {
-    console.error('Search failed:', error.message)
-    return reply('❌ YouTube search failed.')
+    console.error('Search failed:', error)
+    return reply(`❌ YouTube search failed.\n\n*Reason:*\n${error.message}`)
   }
   if (!info) return reply(`❌ Nothing found.`)
 
@@ -186,7 +178,7 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
   let media
   await acquire()
   try {
-    media = await downloadWithYoutubeI(ctx)
+    media = await downloadWithYoutubeI(innertube, ctx)
   } catch (error) {
     await card
     return reply(`❌ Download failed.\n\n*Reason:*\n${error.message}`)
