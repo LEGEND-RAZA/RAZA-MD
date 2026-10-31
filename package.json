@@ -1,6 +1,7 @@
 {
   "name": "raza-md",
   "version": "1.0.0",
+  "description": "RAZA-MD WhatsApp bot with pairing-code login and plugin system.",
   "type": "module",
   "main": "index.js",
   "scripts": {
