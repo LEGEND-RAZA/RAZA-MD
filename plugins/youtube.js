@@ -141,12 +141,17 @@ async function downloadWithCookie(ctx) {
     throw new Error('Missing YT_COOKIE. Please add it to your Environment Variables.')
   }
 
-  // 1. Create the bypass agent directly from the string
-  const agent = ytdl.createAgent(CFG.cookieString)
-
   try {
-    // 2. Fetch video info using the agent AND force IOS/ANDROID clients
-    // IOS/ANDROID clients bypass the new SABR DRM streams that cause "No playable formats"
+    // 1. Parse the cookie string into the array of objects that ytdl-core requires
+    const cookies = CFG.cookieString.split(';').map(c => {
+      const [name, ...val] = c.trim().split('=')
+      return { name, value: val.join('=') }
+    })
+
+    // 2. Create the agent
+    const agent = ytdl.createAgent(cookies)
+
+    // 3. Fetch video info using the agent AND force IOS/ANDROID clients
     const info = await ytdl.getInfo(ctx.videoUrl, { 
       agent,
       playerClients: ['IOS', 'ANDROID'] 
