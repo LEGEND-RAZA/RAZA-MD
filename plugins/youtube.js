@@ -1,16 +1,13 @@
 /*
  * youtube.js: YouTube song + video downloader
- * 
- * Commands:
- *   .play <song name or link>     -> sends audio
- *   .video <name or link> [360|480|720]   -> sends video
  */
 
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
 import ffmpegPath from 'ffmpeg-static'
-import youtubedl from 'youtube-dl-exec'
+import ytdl from '@distube/ytdl-core'
 
 const CFG = {
   maxMB: Number(process.env.YT_MAX_MB) || 60,
@@ -262,10 +259,12 @@ async function oceansaver(ctx) {
 async function freeApis(ctx) {
   const endpoints = ctx.kind === 'audio' ? [
     `https://api.vreden.web.id/api/ytmp3?url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.nexoracle.com/downloader/ytmp3?apikey=free&url=${encodeURIComponent(ctx.videoUrl)}`
+    `https://api.nexoracle.com/downloader/ytmp3?apikey=free&url=${encodeURIComponent(ctx.videoUrl)}`,
+    `https://api.ryzendesu.vip/api/downloader/ytmp3?url=${encodeURIComponent(ctx.videoUrl)}`
   ] : [
     `https://api.vreden.web.id/api/ytmp4?url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.nexoracle.com/downloader/ytmp4?apikey=free&url=${encodeURIComponent(ctx.videoUrl)}`
+    `https://api.nexoracle.com/downloader/ytmp4?apikey=free&url=${encodeURIComponent(ctx.videoUrl)}`,
+    `https://api.ryzendesu.vip/api/downloader/ytmp4?url=${encodeURIComponent(ctx.videoUrl)}`
   ]
 
   let lastError
@@ -282,41 +281,69 @@ async function freeApis(ctx) {
   throw lastError
 }
 
-const MIME_BY_EXT = { mp3: 'audio/mpeg', m4a: 'audio/mp4', webm: 'audio/webm', opus: 'audio/ogg', mp4: 'video/mp4' }
-
-// 100% Native module usage. It will ALWAYS find the binary now.
-async function ytdlp(ctx) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yt-'))
+// 🚀 NEW FALLBACK: Pure JavaScript Downloader (No Python, No yt-dlp)
+async function localDownloader(ctx) {
   try {
-    const flags = {
-      noPlaylist: true,
-      noWarnings: true,
-      noProgress: true,
-      output: path.join(dir, 'file.%(ext)s'),
-      maxFilesize: `${CFG.maxMB}M`
-    }
-
-    if (ffmpegPath) flags.ffmpegLocation = path.dirname(ffmpegPath)
-
+    const info = await ytdl.getInfo(ctx.videoUrl)
+    
     if (ctx.kind === 'audio') {
-      flags.extractAudio = true
-      flags.audioFormat = 'mp3'
-      flags.audioQuality = '5'
+      const format = ytdl.chooseFormat(info.formats, { quality: 'highestaudio', filter: 'audioonly' })
+      if (!format) throw new Error('No audio format found')
+
+      const audioStream = ytdl.downloadFromInfo(info, { format })
+      if (!ffmpegPath) throw new Error('ffmpeg-static not found')
+      
+      const ffmpeg = spawn(ffmpegPath, [
+        '-i', 'pipe:0',
+        '-vn',
+        '-acodec', 'libmp3lame',
+        '-f', 'mp3',
+        'pipe:1'
+      ])
+
+      audioStream.pipe(ffmpeg.stdin)
+
+      const chunks = []
+      ffmpeg.stdout.on('data', chunk => chunks.push(chunk))
+      
+      await new Promise((resolve, reject) => {
+        ffmpeg.on('close', code => {
+          if (code === 0) resolve()
+          else reject(new Error(`ffmpeg exited with code ${code}`))
+        })
+        ffmpeg.on('error', reject)
+        audioStream.on('error', reject)
+      })
+
+      return { buffer: Buffer.concat(chunks), mimetype: 'audio/mpeg' }
     } else {
-      flags.format = `best[height<=${ctx.quality}][ext=mp4]/best[height<=${ctx.quality}]/best`
+      const format = ytdl.chooseFormat(info.formats, { quality: `highestvideo[height<=${ctx.quality}]` }) || 
+                     ytdl.chooseFormat(info.formats, { quality: 'highest' })
+                     
+      if (!format) throw new Error('No video format found')
+
+      const buffer = await new Promise((resolve, reject) => {
+        const chunks = []
+        const stream = ytdl.downloadFromInfo(info, { format })
+        
+        let total = 0
+        stream.on('data', chunk => {
+          total += chunk.length
+          if (total > CFG.maxMB * 1048576) {
+            stream.destroy()
+            reject(new TooBigError(total))
+            return
+          }
+          chunks.push(chunk)
+        })
+        stream.on('end', () => resolve(Buffer.concat(chunks)))
+        stream.on('error', reject)
+      })
+
+      return { buffer, mimetype: 'video/mp4' }
     }
-
-    // Using the module directly - no execFileAsync needed
-    await youtubedl(ctx.videoUrl, flags, { timeout: 180000 })
-
-    const file = fs.readdirSync(dir).find(f => f.startsWith('file.'))
-    if (!file) throw new Error('yt-dlp produced no file')
-
-    const buffer = await fs.promises.readFile(path.join(dir, file))
-    const ext = path.extname(file).slice(1).toLowerCase()
-    return { buffer, mimetype: MIME_BY_EXT[ext] || 'audio/mpeg' }
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true })
+  } catch (e) {
+    throw new Error(`local-downloader: ${e.message}`)
   }
 }
 
@@ -325,7 +352,7 @@ function providers() {
   if (CFG.customMp3 || CFG.customMp4) list.push({ name: 'custom', fn: customApi })
   list.push({ name: 'oceansaver', fn: oceansaver })
   list.push({ name: 'free-apis', fn: freeApis })
-  list.push({ name: 'yt-dlp', fn: ytdlp })
+  list.push({ name: 'local-downloader', fn: localDownloader })
   return list
 }
 
