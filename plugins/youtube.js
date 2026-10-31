@@ -1,10 +1,9 @@
 /*
- * youtube.js – YouTube downloader powered by yt-dlp
+ * youtube.js: YouTube downloader using ytdlp-nodejs
  * Robust against SABR, PO-token, and datacenter-IP blocks.
  */
 
 import { spawn } from 'node:child_process'
-import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import ffmpegPath from 'ffmpeg-static'
 import { YtDlp } from 'ytdlp-nodejs'
@@ -16,7 +15,8 @@ const CFG = {
   maxAudioMin: Number(process.env.YT_MAX_AUDIO_MIN) || 30,
   maxVideoMin: Number(process.env.YT_MAX_VIDEO_MIN) || 15,
   videoQuality: String(process.env.YT_VIDEO_QUALITY || '360'),
-  cookieFile: process.env.YT_COOKIE_FILE || null, // optional path to cookies.txt
+  // Optional: If you upload a cookies.txt file to Heroku, set the path here
+  cookieFile: process.env.YT_COOKIE_FILE || null, 
   downloadTimeoutMs: Number(process.env.YT_DOWNLOAD_TIMEOUT_MS) || 180000
 }
 
@@ -44,11 +44,11 @@ function extractVideoId(text) {
 
 async function searchYouTube(query) {
   const results = await ytdlp.search(query, { maxResults: 1 })
-  if (!results.length) return null
+  if (!results || results.length === 0) return null
   const v = results[0]
   return {
     id: v.id,
-    title: v.title,
+    title: v.title || 'YouTube Video',
     duration: v.duration_string || '',
     seconds: v.duration || 0
   }
@@ -58,7 +58,7 @@ async function lookupLink(id) {
   const info = await ytdlp.getInfo(`https://www.youtube.com/watch?v=${id}`)
   return {
     id,
-    title: info.title,
+    title: info.title || 'YouTube Video',
     duration: info.duration_string || '',
     seconds: info.duration || 0
   }
@@ -67,26 +67,27 @@ async function lookupLink(id) {
 /* ---------- download via yt-dlp ---------- */
 
 async function downloadAudio(url) {
-  const stream = await ytdlp.stream(url, {
-    format: 'bestaudio/best',
-    ...(CFG.cookieFile ? { cookies: CFG.cookieFile } : {})
-  })
+  const args = { format: 'bestaudio/best' }
+  if (CFG.cookieFile) args.cookies = CFG.cookieFile
+
+  const stream = await ytdlp.stream(url, args)
   return await convertToMp3(stream)
 }
 
 async function downloadVideo(url, quality) {
-  const format = `bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]`
-  const stream = await ytdlp.stream(url, {
-    format,
-    mergeOutputFormat: 'mp4',
-    ...(CFG.cookieFile ? { cookies: CFG.cookieFile } : {})
-  })
+  const args = { 
+    format: `bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]`,
+    mergeOutputFormat: 'mp4'
+  }
+  if (CFG.cookieFile) args.cookies = CFG.cookieFile
+
+  const stream = await ytdlp.stream(url, args)
   return await collectStream(stream)
 }
 
 /* ---------- stream processing ---------- */
 
-async function convertToMp3(webStream) {
+async function convertToMp3(nodeStream) {
   if (!ffmpegPath) throw new Error('ffmpeg-static not found')
 
   const ffmpeg = spawn(ffmpegPath, [
@@ -114,8 +115,8 @@ async function convertToMp3(webStream) {
     stderrTail = (stderrTail + chunk.toString()).slice(-2000)
   })
 
-  const source = Readable.fromWeb(webStream)
-  const input = pipeline(source, ffmpeg.stdin).catch(err => {
+  // ytdlp-nodejs returns a Node stream, so we pipe it directly to ffmpeg
+  const input = pipeline(nodeStream, ffmpeg.stdin).catch(err => {
     if (err?.code !== 'EPIPE' && err?.code !== 'ERR_STREAM_PREMATURE_CLOSE') throw err
   })
 
@@ -134,22 +135,21 @@ async function convertToMp3(webStream) {
   return { buffer: Buffer.concat(chunks), mimetype: 'audio/mpeg' }
 }
 
-async function collectStream(webStream) {
-  const readable = Readable.fromWeb(webStream)
+async function collectStream(nodeStream) {
   const chunks = []
   let total = 0
 
   return new Promise((resolve, reject) => {
-    readable.on('data', chunk => {
+    nodeStream.on('data', chunk => {
       total += chunk.length
       if (total > CFG.maxMB * 1048576) {
-        readable.destroy()
+        nodeStream.destroy()
         return reject(new Error(`file exceeds ${CFG.maxMB} MB`))
       }
       chunks.push(chunk)
     })
-    readable.on('end', () => resolve({ buffer: Buffer.concat(chunks), mimetype: 'video/mp4' }))
-    readable.on('error', reject)
+    nodeStream.on('end', () => resolve({ buffer: Buffer.concat(chunks), mimetype: 'video/mp4' }))
+    nodeStream.on('error', reject)
   })
 }
 
