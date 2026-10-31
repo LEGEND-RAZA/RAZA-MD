@@ -16,14 +16,6 @@ import youtubedl from 'youtube-dl-exec'
 
 const execFileAsync = promisify(execFile)
 
-// Automatically add ffmpeg-static to the system PATH so yt-dlp can find it
-if (ffmpegPath) {
-  process.env.PATH = `${path.dirname(ffmpegPath)}${path.delimiter}${process.env.PATH}`
-}
-
-// Get the exact path to the yt-dlp binary
-const YT_DLP_BINARY = youtubedl.constants?.YOUTUBE_DL_PATH || 'yt-dlp'
-
 const CFG = {
   maxMB: Number(process.env.YT_MAX_MB) || 60,
   maxAudioMin: Number(process.env.YT_MAX_AUDIO_MIN) || 30,
@@ -31,18 +23,12 @@ const CFG = {
   videoQuality: String(process.env.YT_VIDEO_QUALITY || '360'),
   customMp3: process.env.YT_API_MP3 || '',
   customMp4: process.env.YT_API_MP4 || '',
-  
-  // Your OceanSaver API Key
   oceanKey: process.env.YT_OCEAN_KEY || '2e89bf854cc249fad8d4c9ec29f7bd4965f69e52',
-  
-  ytdlp: process.env.YTDLP_PATH || YT_DLP_BINARY,
   cookies: process.env.YTDLP_COOKIES || '',
   parallel: Number(process.env.YT_PARALLEL) || 2
 }
 
-const UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
-
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36'
 const QUALITIES = ['144', '240', '360', '480', '720', '1080']
 
 const log = (...a) => console.log('[YT]', ...a)
@@ -150,18 +136,14 @@ async function downloadBuffer(url, maxBytes) {
 
 function parseDuration(text) {
   if (!text) return 0
-  return String(text)
-    .split(':')
-    .map(Number)
-    .reduce((sec, part) => sec * 60 + (part || 0), 0)
+  return String(text).split(':').map(Number).reduce((sec, part) => sec * 60 + (part || 0), 0)
 }
 
 const safeName = s => String(s || 'youtube').replace(/[\\/:*?"<>|\n\r]+/g, ' ').trim().slice(0, 80) || 'youtube'
 
 /* ---------- finding the video ---------- */
 
-const YT_URL =
-  /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:[^\s#]*&)?v=|shorts\/|embed\/|live\/|v\/))([\w-]{11})/i
+const YT_URL = /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:[^\s#]*&)?v=|shorts\/|embed\/|live\/|v\/))([\w-]{11})/i
 
 function extractVideoId(text) {
   return String(text || '').match(YT_URL)?.[1] || null
@@ -190,10 +172,7 @@ function extractInitialData(html) {
 }
 
 async function searchYouTube(query) {
-  const url =
-    `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}` +
-    '&sp=EgIQAQ%253D%253D&hl=en&gl=US'
-
+  const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}&sp=EgIQAQ%253D%253D&hl=en&gl=US`
   const html = await fetchText(url, 12000, { Cookie: 'CONSENT=YES+1; SOCS=CAI' })
   const data = extractInitialData(html)
 
@@ -285,16 +264,16 @@ async function oceansaver(ctx) {
   throw lastError
 }
 
-// Added new reliable APIs
+// Replaced with active, reliable APIs
 async function freeApis(ctx) {
   const endpoints = ctx.kind === 'audio' ? [
-    `https://api.betabotz.eu.org/api/download/ytmp3?url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.ryzendesu.vip/api/downloader/ytmp3?url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.akuari.my.id/downloader/ytmp3?link=${encodeURIComponent(ctx.videoUrl)}`
+    `https://api.vreden.web.id/api/ytmp3?url=${encodeURIComponent(ctx.videoUrl)}`,
+    `https://api.nexoracle.com/downloader/ytmp3?apikey=free&url=${encodeURIComponent(ctx.videoUrl)}`,
+    `https://api.agatz.xyz/api/ytmp3?url=${encodeURIComponent(ctx.videoUrl)}`
   ] : [
-    `https://api.betabotz.eu.org/api/download/ytmp4?url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.ryzendesu.vip/api/downloader/ytmp4?url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.akuari.my.id/downloader/ytmp4?link=${encodeURIComponent(ctx.videoUrl)}`
+    `https://api.vreden.web.id/api/ytmp4?url=${encodeURIComponent(ctx.videoUrl)}`,
+    `https://api.nexoracle.com/downloader/ytmp4?apikey=free&url=${encodeURIComponent(ctx.videoUrl)}`,
+    `https://api.agatz.xyz/api/ytmp4?url=${encodeURIComponent(ctx.videoUrl)}`
   ]
 
   let lastError
@@ -311,55 +290,38 @@ async function freeApis(ctx) {
   throw lastError
 }
 
-async function siputzx(ctx) {
-  const paths = ctx.kind === 'audio' ? ['/api/d/ytmp3', '/api/dl/youtube/mp3'] : ['/api/d/ytmp4', '/api/dl/youtube/mp4']
-  let lastError
-  for (const p of paths) {
-    try {
-      const data = await fetchJson(`https://api.siputzx.my.id${p}?url=${encodeURIComponent(ctx.videoUrl)}`, 30000)
-      const url = pickUrl(data)
-      if (url) return { url, title: data?.data?.title }
-      lastError = new Error('no link in response')
-    } catch (error) {
-      lastError = error
-    }
-  }
-  throw lastError
-}
-
-let ytdlpAvailable = null
-let ffmpegAvailable = null
-
-async function hasBinary(bin, arg) {
-  try {
-    await execFileAsync(bin, [arg], { timeout: 8000 })
-    return true
-  } catch {
-    return false
-  }
-}
-
 const MIME_BY_EXT = { mp3: 'audio/mpeg', m4a: 'audio/mp4', webm: 'audio/webm', opus: 'audio/ogg', mp4: 'video/mp4' }
 
+// FIXED: Uses youtube-dl-exec natively instead of looking for the system binary
 async function ytdlp(ctx) {
-  if (ytdlpAvailable === null) ytdlpAvailable = await hasBinary(CFG.ytdlp, '--version')
-  if (!ytdlpAvailable) throw new Error('yt-dlp is not installed')
-
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yt-'))
   try {
-    const args = ['--no-playlist', '--no-warnings', '--no-progress', '--max-filesize', `${CFG.maxMB}M`, '-o', path.join(dir, 'file.%(ext)s')]
-    if (CFG.cookies) args.push('--cookies', CFG.cookies)
+    const flags = {
+      noPlaylist: true,
+      noWarnings: true,
+      noProgress: true,
+      maxFilesize: `${CFG.maxMB}M`,
+      output: path.join(dir, 'file.%(ext)s')
+    }
+
+    if (CFG.cookies) flags.cookies = CFG.cookies
+
+    // Tell yt-dlp where ffmpeg-static is
+    if (ffmpegPath) {
+      flags.ffmpegLocation = path.dirname(ffmpegPath)
+    }
 
     if (ctx.kind === 'audio') {
-      if (ffmpegAvailable === null) ffmpegAvailable = await hasBinary('ffmpeg', '-version')
-      if (ffmpegAvailable) args.push('-x', '--audio-format', 'mp3', '--audio-quality', '5')
-      else args.push('-f', 'bestaudio[ext=m4a]/bestaudio')
+      flags.extractAudio = true
+      flags.audioFormat = 'mp3'
+      flags.audioQuality = '5'
     } else {
-      args.push('-f', `best[height<=${ctx.quality}][ext=mp4]/best[height<=${ctx.quality}]/best`)
+      flags.format = `best[height<=${ctx.quality}][ext=mp4]/best[height<=${ctx.quality}]/best`
     }
-    args.push(ctx.videoUrl)
 
-    await execFileAsync(CFG.ytdlp, args, { timeout: 180000, maxBuffer: 10 * 1024 * 1024 })
+    // Call the binary directly via the module
+    await youtubedl(ctx.videoUrl, flags, { timeout: 180000 })
+
     const file = fs.readdirSync(dir).find(f => f.startsWith('file.'))
     if (!file) throw new Error('yt-dlp produced no file')
 
@@ -376,7 +338,6 @@ function providers() {
   if (CFG.customMp3 || CFG.customMp4) list.push({ name: 'custom', fn: customApi })
   list.push({ name: 'oceansaver', fn: oceansaver })
   list.push({ name: 'free-apis', fn: freeApis })
-  list.push({ name: 'siputzx', fn: siputzx })
   list.push({ name: 'yt-dlp', fn: ytdlp })
   return list
 }
@@ -463,7 +424,6 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
       return reply(`❌ That file is too big for WhatsApp (${error.message}, limit ${CFG.maxMB} MB).` + (kind === 'video' ? ' Try a lower quality, e.g. 240.' : ''))
     }
     console.error('[YT] all sources failed:', error.message)
-    // Shows exact error if all else fails
     return reply(`❌ Download failed.\n\n*Errors:*\n${error.message}`)
   } finally {
     release()
