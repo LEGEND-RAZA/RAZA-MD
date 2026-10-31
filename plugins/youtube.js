@@ -6,15 +6,11 @@
  *   .video <name or link> [360|480|720]   -> sends video
  */
 
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import ffmpegPath from 'ffmpeg-static'
 import youtubedl from 'youtube-dl-exec'
-
-const execFileAsync = promisify(execFile)
 
 const CFG = {
   maxMB: Number(process.env.YT_MAX_MB) || 60,
@@ -24,7 +20,6 @@ const CFG = {
   customMp3: process.env.YT_API_MP3 || '',
   customMp4: process.env.YT_API_MP4 || '',
   oceanKey: process.env.YT_OCEAN_KEY || '2e89bf854cc249fad8d4c9ec29f7bd4965f69e52',
-  cookies: process.env.YTDLP_COOKIES || '',
   parallel: Number(process.env.YT_PARALLEL) || 2
 }
 
@@ -264,16 +259,13 @@ async function oceansaver(ctx) {
   throw lastError
 }
 
-// Replaced with active, reliable APIs
 async function freeApis(ctx) {
   const endpoints = ctx.kind === 'audio' ? [
     `https://api.vreden.web.id/api/ytmp3?url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.nexoracle.com/downloader/ytmp3?apikey=free&url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.agatz.xyz/api/ytmp3?url=${encodeURIComponent(ctx.videoUrl)}`
+    `https://api.nexoracle.com/downloader/ytmp3?apikey=free&url=${encodeURIComponent(ctx.videoUrl)}`
   ] : [
     `https://api.vreden.web.id/api/ytmp4?url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.nexoracle.com/downloader/ytmp4?apikey=free&url=${encodeURIComponent(ctx.videoUrl)}`,
-    `https://api.agatz.xyz/api/ytmp4?url=${encodeURIComponent(ctx.videoUrl)}`
+    `https://api.nexoracle.com/downloader/ytmp4?apikey=free&url=${encodeURIComponent(ctx.videoUrl)}`
   ]
 
   let lastError
@@ -292,7 +284,7 @@ async function freeApis(ctx) {
 
 const MIME_BY_EXT = { mp3: 'audio/mpeg', m4a: 'audio/mp4', webm: 'audio/webm', opus: 'audio/ogg', mp4: 'video/mp4' }
 
-// FIXED: Uses youtube-dl-exec natively instead of looking for the system binary
+// 100% Native module usage. It will ALWAYS find the binary now.
 async function ytdlp(ctx) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'yt-'))
   try {
@@ -300,16 +292,11 @@ async function ytdlp(ctx) {
       noPlaylist: true,
       noWarnings: true,
       noProgress: true,
-      maxFilesize: `${CFG.maxMB}M`,
-      output: path.join(dir, 'file.%(ext)s')
+      output: path.join(dir, 'file.%(ext)s'),
+      maxFilesize: `${CFG.maxMB}M`
     }
 
-    if (CFG.cookies) flags.cookies = CFG.cookies
-
-    // Tell yt-dlp where ffmpeg-static is
-    if (ffmpegPath) {
-      flags.ffmpegLocation = path.dirname(ffmpegPath)
-    }
+    if (ffmpegPath) flags.ffmpegLocation = path.dirname(ffmpegPath)
 
     if (ctx.kind === 'audio') {
       flags.extractAudio = true
@@ -319,7 +306,7 @@ async function ytdlp(ctx) {
       flags.format = `best[height<=${ctx.quality}][ext=mp4]/best[height<=${ctx.quality}]/best`
     }
 
-    // Call the binary directly via the module
+    // Using the module directly - no execFileAsync needed
     await youtubedl(ctx.videoUrl, flags, { timeout: 180000 })
 
     const file = fs.readdirSync(dir).find(f => f.startsWith('file.'))
