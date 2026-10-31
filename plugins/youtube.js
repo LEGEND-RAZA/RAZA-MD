@@ -1,5 +1,12 @@
 /*
  * youtube.js: YouTube downloader (youtubei.js v18 API)
+ * Authenticated via YT_COOKIE env var (set on Heroku config vars).
+ *
+ * KEY FIXES:
+ *   - retrieve_player: true  → downloads JS player → fixes "No valid URL to decipher"
+ *   - Cookie-aware client order → uses WEB/IOS/ANDROID first when authenticated
+ *   - Safe fallback to TV/TV_EMBEDDED (no PO token required) when no cookie
+ *   - Optional YT_PO_TOKEN support for extra reliability
  */
 
 import { spawn } from 'node:child_process'
@@ -9,50 +16,57 @@ import ffmpegPath from 'ffmpeg-static'
 import * as YTJS from 'youtubei.js'
 import { Innertube, Platform, UniversalCache } from 'youtubei.js'
 
-/*
- * youtubei.js has no built-in JavaScript interpreter; it needs this to
- * decipher stream URLs.
- */
+// youtubei.js has no built-in JS interpreter; it needs this for deciphering
 Platform.shim.eval = async data => new Function(data.output)()
 
-// Hide the harmless "XYZ not found" parser warnings (they spam the logs
-// and cost memory). Real errors still print.
 try { YTJS.Log?.setLevel?.(YTJS.Log.Level.ERROR) } catch {}
+
+/* ---------- config ---------- */
+
+function parseCookie(raw) {
+  if (!raw) return ''
+  return String(raw)
+    .trim()
+    .replace(/^cookie:\s*/i, '')   // strip accidental "Cookie:" prefix
+    .replace(/^["']|["']$/g, '')   // strip wrapping quotes
+}
 
 const CFG = {
   maxMB: Number(process.env.YT_MAX_MB) || 60,
   maxAudioMin: Number(process.env.YT_MAX_AUDIO_MIN) || 30,
   maxVideoMin: Number(process.env.YT_MAX_VIDEO_MIN) || 15,
   videoQuality: String(process.env.YT_VIDEO_QUALITY || '360'),
-  cookieString: process.env.YT_COOKIE || '',
+  cookieString: parseCookie(process.env.YT_COOKIE),
+  poToken: String(process.env.YT_PO_TOKEN || '').trim(),
   downloadTimeoutMs: Number(process.env.YT_DOWNLOAD_TIMEOUT_MS) || 180000
 }
 
-const QUALITIES = ['144', '240', '360', '480', '720', '1080']
+const HAS_COOKIE = CFG.cookieString.length > 0
+const HAS_PO_TOKEN = CFG.poToken.length > 0
 
+console.log(`[YouTube] Auth: ${HAS_COOKIE ? `COOKIE SET (${CFG.cookieString.length} chars)` : 'anonymous'}`)
+if (HAS_PO_TOKEN) console.log('[YouTube] PO token: SET')
+
+const QUALITIES = ['144', '240', '360', '480', '720', '1080']
 const PLAYER_CACHE = new UniversalCache(false)
 
-/*
- * In youtubei.js v18 the "client" is chosen PER REQUEST
- * (getBasicInfo(id, { client })), not when the session is created.
- * Valid names: IOS WEB MWEB ANDROID ANDROID_VR VISIONOS YTMUSIC
- * YTMUSIC_ANDROID YTSTUDIO_ANDROID TV TV_SIMPLY TV_EMBEDDED YTKIDS
- * WEB_EMBEDDED WEB_CREATOR
- *
- * Order matters on a server: ANDROID_VR and TV don't need a PO token, so
- * they go first. Override on Heroku with YT_CLIENT_TYPES (or delete that
- * config var to use this default).
- */
 const VALID_CLIENTS = new Set([
   'IOS', 'WEB', 'MWEB', 'ANDROID', 'ANDROID_VR', 'VISIONOS', 'YTMUSIC',
   'YTMUSIC_ANDROID', 'YTSTUDIO_ANDROID', 'TV', 'TV_SIMPLY', 'TV_EMBEDDED',
   'YTKIDS', 'WEB_EMBEDDED', 'WEB_CREATOR'
 ])
 
-const CLIENT_TYPES = (process.env.YT_CLIENT_TYPES || 'ANDROID_VR,TV,TV_EMBEDDED,WEB_EMBEDDED,IOS,ANDROID,WEB')
+// With a cookie, authenticated clients work reliably.
+// Without a cookie, TV clients don't need a PO token.
+const DEFAULT_CLIENTS_WITH_COOKIE = 'WEB,IOS,ANDROID,TV,TV_EMBEDDED,MWEB,ANDROID_VR,WEB_EMBEDDED'
+const DEFAULT_CLIENTS_NO_COOKIE  = 'TV,TV_EMBEDDED,WEB_EMBEDDED,MWEB,ANDROID_VR,IOS,ANDROID,WEB'
+
+const CLIENT_TYPES = (process.env.YT_CLIENTS || (HAS_COOKIE ? DEFAULT_CLIENTS_WITH_COOKIE : DEFAULT_CLIENTS_NO_COOKIE))
   .split(',')
   .map(s => s.trim().toUpperCase())
   .filter(c => VALID_CLIENTS.has(c))
+
+console.log(`[YouTube] Clients: ${CLIENT_TYPES.join(' -> ')}`)
 
 let lastGoodClient = null
 
@@ -62,11 +76,8 @@ function orderedClients(preferred) {
     : CLIENT_TYPES
 }
 
-/*
- * ONE shared session (default WEB context) reused for everything, and
- * refreshed hourly. This keeps memory low: the player script is parsed
- * once instead of once per attempt.
- */
+/* ---------- session ---------- */
+
 const SESSION_TTL_MS = 60 * 60 * 1000
 let session = null
 let sessionAt = 0
@@ -76,24 +87,32 @@ async function getSession() {
 
   const pending = Innertube.create({
     cache: PLAYER_CACHE,
-    ...(CFG.cookieString ? { cookie: CFG.cookieString } : {})
+    retrieve_player: true,                                 // ← CRITICAL FIX
+    ...(HAS_COOKIE   ? { cookie: CFG.cookieString } : {}),
+    ...(HAS_PO_TOKEN ? { po_token: CFG.poToken }    : {})
   })
   session = pending
   sessionAt = Date.now()
 
   try {
-    return await pending
+    const yt = await pending
+    if (HAS_COOKIE) {
+      try {
+        if (yt.session.logged_in) {
+          console.log('[YouTube] Session authenticated ✓')
+        } else {
+          console.warn('[YouTube] Cookie provided but session is NOT logged in (cookie may be expired).')
+        }
+      } catch {}
+    }
+    return yt
   } catch (error) {
     if (session === pending) session = null
+    console.error('[YouTube] Session creation failed:', error?.message || error)
     throw error
   }
 }
 
-/*
- * getBasicInfo only calls the /player endpoint (getInfo also calls /next,
- * which several clients reject with 400/404), and we check playability so
- * "login required" etc. moves on to the next client.
- */
 async function getPlayableInfo(yt, id, client) {
   const info = await yt.getBasicInfo(id, { client })
   const status = info.playability_status?.status
@@ -186,8 +205,6 @@ async function lookupLink(yt, id) {
 /* ---------- downloader ---------- */
 
 function pickVideoFormat(info, quality) {
-  // chooseFormat THROWS when nothing matches, so try the wanted quality
-  // first and then "best".
   for (const q of [`${quality}p`, 'best']) {
     try {
       return info.chooseFormat({ type: 'video+audio', quality: q })
@@ -215,11 +232,11 @@ async function downloadWithYoutubeI(ctx) {
       }
 
       lastGoodClient = client
+      console.log(`[YouTube] ✓ downloaded via "${client}"`)
       return media
     } catch (error) {
       lastError = error
       console.error(`[YouTube] download via "${client}" failed:`, error?.message || error)
-      // A size limit or an external timeout will hit every client the same.
       if (error?.tooBig || ctx.signal?.aborted) throw error
     }
   }
@@ -338,8 +355,6 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
   }
   if (!info) return reply(`❌ Nothing found.`)
 
-  // info.seconds is 0 for livestreams/premieres, which would silently skip
-  // the duration limit, so those are blocked outright.
   const maxMin = kind === 'audio' ? CFG.maxAudioMin : CFG.maxVideoMin
   if (!info.seconds) {
     return reply(`❌ Can't verify this video's length (likely a livestream/premiere) — blocked by the duration limit.`)
@@ -377,6 +392,6 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
   }
 }
 
-export const playCommand = { command: ['play', 'song', 'ytmp3', 'yta'], run: ctx => handle('audio', ctx) }
-export const videoCommand = { command: ['video', 'ytmp4', 'ytv'], run: ctx => handle('video', ctx) }
+export const playCommand  = { command: ['play', 'song', 'ytmp3', 'yta'], run: ctx => handle('audio', ctx) }
+export const videoCommand = { command: ['video', 'ytmp4', 'ytv'],         run: ctx => handle('video', ctx) }
 export default playCommand
