@@ -1,7 +1,7 @@
 {
   "name": "raza-md",
   "version": "1.0.0",
-  "description": "RAZA-MD WhatsApp bot with pairing-code login and plugin system.",
+  "description": "RAZA-MD WhatsApp bot",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -11,13 +11,13 @@
     "node": ">=20.6.0"
   },
   "dependencies": {
+    "@distube/ytdl-core": "^4.14.4",
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "7.0.0-rc14",
     "dotenv": "^17.4.0",
     "edge-tts-universal": "^1.4.0",
     "ffmpeg-static": "^5.2.0",
     "mysql2": "^3.14.3",
-    "pino": "^9.7.0",
-    "youtube-dl-exec": "^3.0.10"
+    "pino": "^9.7.0"
   }
 }
