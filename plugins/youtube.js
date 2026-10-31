@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import ffmpegPath from 'ffmpeg-static'
-import { Innertube } from 'youtubei.js'
+import { Innertube, UniversalCache } from 'youtubei.js'
 
 const CFG = {
   maxMB: Number(process.env.YT_MAX_MB) || 60,
@@ -20,14 +20,29 @@ const CFG = {
 const QUALITIES = ['144', '240', '360', '480', '720', '1080']
 
 /*
- * NEW: client-type fallback.
+ * NEW — fixes the OOM crash (Heroku R15):
+ *
+ * Innertube.create() has `cache: undefined` by default, which means every
+ * single call re-fetches AND re-parses YouTube's player script from
+ * scratch to extract its signature-decipher routine. With client fallback
+ * creating a fresh instance per attempt (up to 4 for download, 1 for
+ * search), a single command could trigger up to 5 of these from-scratch
+ * parses — that's what spiked memory to 1.1GB and got the dyno killed.
+ * One shared cache, reused across every create() call, fixes that.
+ */
+const PLAYER_CACHE = new UniversalCache(false)
+
+/*
+ * Client-type fallback.
  *
  * youtubei.js emulates real YouTube clients (ANDROID, WEB, IOS, ...) and
  * YouTube periodically breaks one of them server-side (stale hardcoded
  * client version -> every call on that client, not just search, starts
- * 404ing). Hardcoding a single client_type means the whole plugin goes
- * down until someone edits the code. Instead we try a short ordered list
- * and remember whichever one last worked.
+ * 404ing), or the WEB client's signature-decipher extraction goes stale
+ * when YouTube ships a new player (also fixed upstream regularly).
+ * Hardcoding one client_type means the whole plugin goes down until
+ * someone edits the code. Instead we try a short ordered list and
+ * remember whichever one last worked.
  *
  * Override the list with YT_CLIENT_TYPES="ANDROID,WEB,IOS" (comma separated)
  * if you want to change the order or add/remove a client.
@@ -40,8 +55,19 @@ const CLIENT_TYPES = (process.env.YT_CLIENT_TYPES || 'ANDROID,WEB,IOS,TV_EMBEDDE
 let lastGoodSearchClient = null
 let lastGoodDownloadClient = null
 
-async function createInnertube(clientType) {
-  return Innertube.create({ cookie: CFG.cookieString, client_type: clientType })
+/*
+ * retrievePlayer defaults to true (needed to decipher stream URLs for an
+ * actual download). Search/metadata-only lookups pass false — deciphering
+ * is never needed just to get a title or video ID, so skipping it avoids
+ * paying for a full player fetch+parse on every search.
+ */
+async function createInnertube(clientType, { retrievePlayer = true } = {}) {
+  return Innertube.create({
+    cookie: CFG.cookieString,
+    client_type: clientType,
+    cache: PLAYER_CACHE,
+    retrieve_player: retrievePlayer
+  })
 }
 
 function orderedClients(preferred) {
@@ -57,11 +83,11 @@ function orderedClients(preferred) {
  * client working, so we don't burn through the whole list on a normal
  * "nothing found" result.
  */
-async function withClientFallback(preferred, task) {
+async function withClientFallback(preferred, createOpts, task) {
   let lastError
   for (const clientType of orderedClients(preferred)) {
     try {
-      const innertube = await createInnertube(clientType)
+      const innertube = await createInnertube(clientType, createOpts)
       const result = await task(innertube)
       return { result, clientType }
     } catch (error) {
@@ -150,10 +176,12 @@ async function lookupLink(innertube, id) {
  *   combined stream is picked — this was why video downloads had no sound.
  * - quality strings must carry the 'p' suffix ("360p", not "360").
  *
- * NEW: wrapped in the same client fallback as search, independently —
- * a video can search fine on one client but fail to download on it
- * (streaming URLs are gated differently per client than search is), so
- * download gets its own attempt order rather than reusing search's client.
+ * Wrapped in the same client fallback as search, independently — a video
+ * can search fine on one client but fail to download on it (streaming
+ * URLs are gated differently per client than search is), so download gets
+ * its own attempt order rather than reusing search's client. Player
+ * retrieval is left at its default (true) here since deciphering is
+ * actually needed for a real download, unlike the search step.
  */
 async function downloadWithYoutubeI(ctx) {
   let lastError
@@ -306,8 +334,11 @@ async function handle(kind, { sock, message, quotedMessage, text, prefix, comman
 
   let info
   try {
+    // retrievePlayer: false — this step only needs a title/duration/id,
+    // never deciphering, so skip the expensive player fetch+parse here.
     const outcome = await withClientFallback(
       lastGoodSearchClient,
+      { retrievePlayer: false },
       yt => (id ? lookupLink(yt, id) : searchYouTube(yt, query))
     )
     info = outcome.result
