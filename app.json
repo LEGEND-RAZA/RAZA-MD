@@ -42,12 +42,12 @@
     "DB_HOST": {
       "description": "Aiven MySQL database host",
       "required": true,
-      "value": "mysql-raza123-innoxcentraza-9801.c.aivencloud.com"
+      "value": "mysql-5075843-innoxcentraza51-73a9.h.aivencloud.com"
     },
     "DB_PORT": {
       "description": "Aiven MySQL database port",
       "required": true,
-      "value": "19244"
+      "value": "26508"
     },
     "DB_NAME": {
       "description": "Aiven MySQL database name",
@@ -62,7 +62,7 @@
     "DB_PASSWORD": {
       "description": "Aiven MySQL database password",
       "required": true,
-      "value": "AVNS_bNdClU_igW6ULgky-vH"
+      "value": "AVNS_qTijgdeJAe2yFVquIC9"
     }
   },
   "formation": {
