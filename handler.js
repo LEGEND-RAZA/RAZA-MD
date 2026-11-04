@@ -8,12 +8,31 @@ import {
 const OWNER_NUMBER =
   (process.env.OWNER_NUMBER || '').replace(/\D/g, '')
 
+/*
+ * ─── PERMANENT OWNERS ───
+ * Includes the phone number AND the LID of the main owner, so owner checks
+ * pass whether the incoming message is delivered as @s.whatsapp.net (older
+ * sessions) or @lid (username-enabled accounts).
+ */
 const PERMANENT_OWNERS = [
   '923493149939',
   '923197135780',
   '923483151716',
-  '923199279334'
+  '923199279334',
+  '117102887366899'   // LID for 923199279334 — safety belt
 ]
+
+/*
+ * ─── KNOWN LIDs ───
+ * Static map from LID → phone number. Applied inside senderNumber() so any
+ * code that reads the sender (owner checks, log lines, mention lookups)
+ * transparently sees the real phone number instead of the LID.
+ *
+ * Add more entries if other owner/sudo accounts get usernames later.
+ */
+const KNOWN_LIDS = {
+  '117102887366899': '923199279334'
+}
 
 /*
  * Messages that arrive while the bot was offline are delivered as type
@@ -70,11 +89,18 @@ export function getSender(message) {
   )
 }
 
+/*
+ * ─── FIX: senderNumber resolves known LIDs to phone numbers ───
+ * '117102887366899@lid' → '923199279334'
+ * Everything downstream (owner checks, logs, mentions) now sees the real
+ * phone number transparently.
+ */
 export function senderNumber(jid) {
-  return String(jid)
+  const raw = String(jid)
     .split('@')[0]
     .split(':')[0]
     .replace(/\D/g, '')
+  return KNOWN_LIDS[raw] || raw
 }
 
 function getSenderNumbers(message) {
@@ -105,11 +131,6 @@ export function isGroup(jid) {
  * ==============================
  * OWNER — synchronous, no DB round-trip
  * ==============================
- *
- * sudo.json is read async and cached; checkIsOwner stays synchronous by
- * reading the cache. The cache is refreshed every 15 s, and the refresh
- * functions are exported so a command that edits sudo/settings can call
- * them to apply the change instantly.
  */
 
 let sudoCache = new Set()
@@ -124,7 +145,7 @@ export async function refreshSudoCache() {
     const list = Array.isArray(data?.sudoNumbers) ? data.sudoNumbers : []
     sudoCache = new Set(
       list
-        .map(n => String(n).replace(/\D/g, ''))
+        .map(n => senderNumber(n))   // resolve LID if sudo file stores one
         .filter(Boolean)
     )
   } catch (e) {
@@ -172,8 +193,8 @@ export function checkIsOwner(message, sock) {
 
 /*
  * Some senders (mainly in groups) only show up as an anonymous @lid id with
- * no phone number attached. Ask Baileys' LID map for the real number, but only
- * for command messages from people who did not already pass the owner check.
+ * no phone number attached. Ask Baileys' LID map for the real number.
+ * Works as a secondary net for LIDs not present in KNOWN_LIDS.
  */
 async function resolveLidOwner(message, sock) {
   try {
@@ -223,11 +244,6 @@ export function unwrapMessage(message) {
   return m
 }
 
-/*
- * Deep view-once detection — unwraps ephemeralMessage / groupStatusMessageV2
- * first, then checks for a VV wrapper. This is what autoread needs to
- * consult before invalidating the media key.
- */
 function isViewOnceDeep(message) {
   let m = message?.message
   if (!m) return false
@@ -274,7 +290,6 @@ export function getQuotedMessage(message) {
   return context?.quotedMessage || null
 }
 
-// messageTimestamp can be a number, a numeric string or a protobuf Long
 function tsSeconds(ts) {
   if (!ts) return 0
   if (typeof ts === 'number') return ts
@@ -287,9 +302,6 @@ function tsSeconds(ts) {
  * ==============================
  * SETTINGS
  * ==============================
- *
- * getDb is async. Settings are cached (refreshed every 15 s) so synchronous
- * reads are correct AND we don't hit the database on every single message.
  */
 
 let settingsCache = { autoread: false, alwaysonline: false }
@@ -429,14 +441,12 @@ function runMessageListeners(messageListeners, data) {
  * ==============================
  */
 
-// fire-and-forget reaction; never throws and is never awaited by the command path
 async function react(sock, jid, key, emoji) {
   try {
     await sock.sendMessage(jid, { react: { text: emoji, key } })
   } catch {}
 }
 
-// WhatsApp can deliver the same message twice (retries, reconnect replays)
 const handledCommands = new Set()
 const HANDLED_MAX = 500
 
@@ -468,9 +478,19 @@ async function processMessage(message, type, sock, plugins, messageListeners) {
     let isOwner = checkIsOwner(message, sock)
 
     /*
-     * Run listeners BEFORE any filtering so statusview / antivv /
-     * antidelete see every incoming message.
+     * LID resolution runs BEFORE listeners for prefixed messages, so
+     * listeners receive the correct isOwner value for LID-enabled owners.
      */
+    if (
+      !isOwner &&
+      text &&
+      text.startsWith(activePrefix) &&
+      !isStatus &&
+      !isGroupStatusPost
+    ) {
+      isOwner = await resolveLidOwner(message, sock)
+    }
+
     runMessageListeners(messageListeners, {
       sock,
       message,
@@ -502,7 +522,6 @@ async function processMessage(message, type, sock, plugins, messageListeners) {
       return
     }
 
-    if (!isOwner) isOwner = await resolveLidOwner(message, sock)
     if (!isOwner) return
 
     if (alreadyHandled(message)) return
@@ -515,11 +534,6 @@ async function processMessage(message, type, sock, plugins, messageListeners) {
       (age > 5 ? ` (message arrived ${age}s late)` : '')
     )
 
-    /*
-     * FIX: the ⏳ reaction used to be awaited before the command started
-     * (a full network round trip, plus a group lookup in groups). It now
-     * goes out in parallel with the command.
-     */
     let failed = false
     react(sock, rawJid, message.key, '⏳')
     setTimeout(() => {
@@ -567,11 +581,6 @@ export async function handleMessages(update, sock, plugins, messageListeners) {
 
   const messages = update.messages || []
 
-  /*
-   * Autoread: one batched read receipt per upsert instead of one per message.
-   * View-once messages are skipped so the antivv listener can still download
-   * the media before its key is invalidated.
-   */
   if (getAutoRead()) {
     const keys = messages
       .filter(m => m?.message && m.key?.id && !m.key.fromMe && !isViewOnceDeep(m))
@@ -582,10 +591,6 @@ export async function handleMessages(update, sock, plugins, messageListeners) {
     }
   }
 
-  /*
-   * FIX: messages (and their commands) are handled in parallel. Before, one
-   * slow command made every message behind it in the same batch wait.
-   */
   await Promise.allSettled(
     messages.map(message =>
       processMessage(message, update.type, sock, plugins, messageListeners)
