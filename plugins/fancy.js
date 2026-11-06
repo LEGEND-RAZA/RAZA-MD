@@ -54,7 +54,7 @@ export default {
     const smallcaps = {
       b: 'ʙ',
       c: 'ᴄ',
-      d: 'ᴅ',
+      d: '𝛛',
       g: 'ɢ',
       h: 'ⱶ֟ؖ꧊',
       i: 'ɪ',
