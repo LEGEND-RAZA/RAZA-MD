@@ -12,9 +12,14 @@ const execFileAsync = promisify(execFile)
 const FFMPEG_PATH = ffmpegStatic || 'ffmpeg'
 const FFPROBE_PATH = ffprobeStatic?.path || 'ffprobe'
 const MAX_VIDEO_BYTES = 60 * 1024 * 1024
-const MIN_VIDEO_BYTES = 16 * 1024
-const MAX_DURATION_SEC = 20 * 60
+const MAX_AUDIO_BYTES = 40 * 1024 * 1024
+const MIN_BYTES = 16 * 1024
+const MAX_VIDEO_DURATION_SEC = 20 * 60
+const MAX_AUDIO_DURATION_SEC = 30 * 60
 const BIN_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000
+
+const VIDEO_COMMANDS = ['video', 'ytvideo', 'ytv']
+const AUDIO_COMMANDS = ['song', 'play']
 
 // ---------- Cookies ----------
 let cookiesPath = null
@@ -26,13 +31,11 @@ function getCookiesFile() {
         : (process.env.YOUTUBE_COOKIES || '')
     if (!value) return null
 
-    // Value may be a path to a cookies file
     if (!value.includes('\n') && !value.includes('=') && fs.existsSync(value)) {
         value = fs.readFileSync(value, 'utf8')
     }
     value = value.replace(/\\n/g, '\n').trim()
 
-    // Convert "a=b; c=d" header format into Netscape format
     if (!/youtube\.com\t/.test(value)) {
         const lines = ['# Netscape HTTP Cookie File']
         for (const part of value.split(';')) {
@@ -43,7 +46,7 @@ function getCookiesFile() {
             lines.push(`.youtube.com\tTRUE\t/\tTRUE\t2147483647\t${name}\t${val}`)
         }
         if (lines.length < 2) {
-            console.error('[Video Plugin] Cookies invalid')
+            console.error('[YT Plugin] Cookies invalid')
             return null
         }
         value = lines.join('\n')
@@ -51,7 +54,7 @@ function getCookiesFile() {
 
     cookiesPath = path.join(os.tmpdir(), 'yt-cookies.txt')
     fs.writeFileSync(cookiesPath, value + '\n')
-    console.log('[Video Plugin] Cookies loaded')
+    console.log('[YT Plugin] Cookies loaded')
     return cookiesPath
 }
 
@@ -70,12 +73,12 @@ async function downloadBinary() {
     await fs.promises.writeFile(tmp, Buffer.from(await res.arrayBuffer()))
     await fs.promises.chmod(tmp, 0o755)
     await fs.promises.rename(tmp, BIN_PATH)
-    console.log('[Video Plugin] yt-dlp binary updated')
+    console.log('[YT Plugin] yt-dlp binary updated')
 }
 
 async function ensureYtDlp() {
     if (process.env.YTDLP_PATH) return process.env.YTDLP_PATH
-    if (process.platform !== 'linux') return 'yt-dlp' // must be installed on PATH
+    if (process.platform !== 'linux') return 'yt-dlp'
 
     const exists = fs.existsSync(BIN_PATH)
     const fresh = exists && Date.now() - fs.statSync(BIN_PATH).mtimeMs < BIN_MAX_AGE_MS
@@ -85,7 +88,7 @@ async function ensureYtDlp() {
         binPromise = downloadBinary()
             .catch(err => {
                 if (!exists) throw err
-                console.error('[Video Plugin] yt-dlp update failed, using old binary:', err.message)
+                console.error('[YT Plugin] yt-dlp update failed, using old binary:', err.message)
             })
             .finally(() => { binPromise = null })
     }
@@ -113,17 +116,26 @@ function fmtDuration(sec) {
     return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`
 }
 
+function safeName(name) {
+    return String(name).replace(/[\\/:*?"<>|]/g, '').slice(0, 80).trim() || 'audio'
+}
+
 // ---------- Download ----------
-async function runYtDlp(bin, url, template, quality, extraArgs) {
+function formatFor(mode, quality) {
+    if (mode === 'audio') return 'bestaudio[ext=m4a]/bestaudio/best'
+    return `bv*[height<=${quality}][ext=mp4]+ba[ext=m4a]/b[height<=${quality}][ext=mp4]/bv*[height<=${quality}]+ba/b[height<=${quality}]/b`
+}
+
+async function runYtDlp(bin, url, template, mode, quality, extraArgs) {
     const cookies = getCookiesFile()
     const args = [
         '-o', template,
-        '-f', `bv*[height<=${quality}][ext=mp4]+ba[ext=m4a]/b[height<=${quality}][ext=mp4]/bv*[height<=${quality}]+ba/b[height<=${quality}]/b`,
-        '--merge-output-format', 'mp4',
+        '-f', formatFor(mode, quality),
+        ...(mode === 'video' ? ['--merge-output-format', 'mp4'] : []),
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
-        '--max-filesize', '60M',
+        '--max-filesize', mode === 'audio' ? '40M' : '60M',
         '--ffmpeg-location', FFMPEG_PATH,
         ...(cookies ? ['--cookies', cookies] : []),
         ...(process.env.YTDLP_PROXY ? ['--proxy', process.env.YTDLP_PROXY] : []),
@@ -133,10 +145,10 @@ async function runYtDlp(bin, url, template, quality, extraArgs) {
     await execFileAsync(bin, args, { timeout: 150_000, maxBuffer: 10 * 1024 * 1024 })
 }
 
-async function downloadVideo(url, quality = 720) {
+async function downloadMedia(url, mode, quality = 720) {
     const bin = await ensureYtDlp()
     const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'yt-dlp-'))
-    const template = path.join(tempDir, 'video.%(ext)s')
+    const template = path.join(tempDir, 'media.%(ext)s')
 
     try {
         const attempts = [
@@ -150,13 +162,13 @@ async function downloadVideo(url, quality = 720) {
         let file = null
         for (const extra of attempts) {
             try {
-                await runYtDlp(bin, url, template, quality, extra)
+                await runYtDlp(bin, url, template, mode, quality, extra)
                 const files = await fs.promises.readdir(tempDir)
-                const found = files.find(f => f.startsWith('video.') && !f.endsWith('.part'))
+                const found = files.find(f => f.startsWith('media.') && !f.endsWith('.part'))
                 if (found) { file = path.join(tempDir, found); break }
             } catch (err) {
                 lastError = err
-                console.error('[Video Plugin] attempt failed:', String(err.stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' | '))
+                console.error('[YT Plugin] attempt failed:', String(err.stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' | '))
             }
         }
 
@@ -166,13 +178,27 @@ async function downloadVideo(url, quality = 720) {
         }
 
         const stats = await fs.promises.stat(file)
-        if (stats.size < MIN_VIDEO_BYTES) throw new Error(`Downloaded file too small (${stats.size} bytes)`)
-        if (stats.size > MAX_VIDEO_BYTES) throw new Error(`File too large (${(stats.size / 1048576).toFixed(1)} MB)`)
+        const limit = mode === 'audio' ? MAX_AUDIO_BYTES : MAX_VIDEO_BYTES
+        if (stats.size < MIN_BYTES) throw new Error(`Downloaded file too small (${stats.size} bytes)`)
+        if (stats.size > limit) throw new Error(`File too large (${(stats.size / 1048576).toFixed(1)} MB)`)
 
-        return await ensureWhatsAppMp4(file, tempDir)
+        return mode === 'audio'
+            ? await convertToMp3(file, tempDir)
+            : await ensureWhatsAppMp4(file, tempDir)
     } finally {
         await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {})
     }
+}
+
+async function convertToMp3(inputPath, dir) {
+    const outPath = path.join(dir, 'final.mp3')
+    await execFileAsync(FFMPEG_PATH, [
+        '-hide_banner', '-loglevel', 'error', '-y', '-i', inputPath,
+        '-vn', '-c:a', 'libmp3lame', '-b:a', '128k', outPath,
+    ], { timeout: 180_000 })
+    const out = await fs.promises.readFile(outPath)
+    if (out.length < MIN_BYTES) throw new Error('ffmpeg produced an invalid MP3')
+    return out
 }
 
 async function ensureWhatsAppMp4(inputPath, dir) {
@@ -202,13 +228,13 @@ async function ensureWhatsAppMp4(inputPath, dir) {
 
     await execFileAsync(FFMPEG_PATH, args, { timeout: 180_000 })
     const fixed = await fs.promises.readFile(fixedPath)
-    if (fixed.length < MIN_VIDEO_BYTES) throw new Error('ffmpeg produced an invalid MP4')
+    if (fixed.length < MIN_BYTES) throw new Error('ffmpeg produced an invalid MP4')
     return fixed
 }
 
 // ---------- Plugin ----------
 export default {
-    command: ['video', 'ytvideo', 'ytv'],
+    command: [...VIDEO_COMMANDS, ...AUDIO_COMMANDS],
     category: 'downloader',
 
     async run(ctx) {
@@ -223,55 +249,75 @@ export default {
         const react = (emoji) => sock.sendMessage(jid, { react: { text: emoji, key: msg.key } }).catch(() => {})
 
         const prefix = ctx.prefix || '.'
-        const command = ctx.command || 'video'
-        let text = ctx.text || ''
+        const fullText = msg.message?.conversation ||
+            msg.message?.extendedTextMessage?.text ||
+            msg.message?.imageMessage?.caption ||
+            msg.message?.videoMessage?.caption || ''
 
+        // Work out which command was used
+        let command = String(ctx.command || '').toLowerCase()
+        if (!command) {
+            const first = fullText.trim().split(/\s+/)[0] || ''
+            command = first.startsWith(prefix) ? first.slice(prefix.length).toLowerCase() : first.toLowerCase()
+        }
+        if (![...VIDEO_COMMANDS, ...AUDIO_COMMANDS].includes(command)) command = 'video'
+
+        const mode = AUDIO_COMMANDS.includes(command) ? 'audio' : 'video'
+
+        let text = ctx.text || ''
         if (!text) {
-            const full = msg.message?.conversation ||
-                msg.message?.extendedTextMessage?.text ||
-                msg.message?.imageMessage?.caption ||
-                msg.message?.videoMessage?.caption || ''
-            text = full.replace(prefix + command, '').trim()
+            text = fullText.trim().replace(new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${command}\\s*`, 'i'), '').trim()
         }
 
-        if (!text) return reply(`Provide video name\nExample: ${prefix}${command} Alan Walker Lily`)
+        if (!text) {
+            return reply(`Provide ${mode === 'audio' ? 'song' : 'video'} name\nExample: ${prefix}${command} Alan Walker Lily`)
+        }
 
         try {
             await react('🔎')
             const vid = await searchYouTube(text)
             if (!vid?.url) {
                 await react('😕')
-                return reply('No video found')
+                return reply(mode === 'audio' ? 'No song found' : 'No video found')
             }
 
-            if (vid.duration > MAX_DURATION_SEC) {
+            const maxDur = mode === 'audio' ? MAX_AUDIO_DURATION_SEC : MAX_VIDEO_DURATION_SEC
+            if (vid.duration > maxDur) {
                 await react('⚠️')
-                return reply(`Video is too long (${fmtDuration(vid.duration)}). Max is ${MAX_DURATION_SEC / 60} minutes.`)
+                return reply(`Too long (${fmtDuration(vid.duration)}). Max is ${maxDur / 60} minutes.`)
             }
 
             const duration = fmtDuration(vid.duration)
             await react('⬇️')
 
-            const caption = `🎬 *${vid.title}*\n\n⏱️ Duration: ${duration}\n👁️ Views: ${Number(vid.views).toLocaleString()}\n📢 Channel: ${vid.author}\n\n⏳ Downloading...`
+            const caption = `${mode === 'audio' ? '🎵' : '🎬'} *${vid.title}*\n\n⏱️ Duration: ${duration}\n👁️ Views: ${Number(vid.views).toLocaleString()}\n📢 Channel: ${vid.author}\n\n⏳ Downloading...`
             if (vid.thumbnail) {
                 await sock.sendMessage(jid, { image: { url: vid.thumbnail }, caption }, { quoted: msg }).catch(() => {})
             } else {
                 await reply(caption)
             }
 
-            const videoBuffer = await downloadVideo(vid.url)
+            const buffer = await downloadMedia(vid.url, mode)
 
-            await sock.sendMessage(jid, {
-                video: videoBuffer,
-                mimetype: 'video/mp4',
-                caption: `🎬 *${vid.title}*\n⏱️ ${duration}`,
-            }, { quoted: msg })
+            if (mode === 'audio') {
+                await sock.sendMessage(jid, {
+                    audio: buffer,
+                    mimetype: 'audio/mpeg',
+                    fileName: `${safeName(vid.title)}.mp3`,
+                }, { quoted: msg })
+            } else {
+                await sock.sendMessage(jid, {
+                    video: buffer,
+                    mimetype: 'video/mp4',
+                    caption: `🎬 *${vid.title}*\n⏱️ ${duration}`,
+                }, { quoted: msg })
+            }
 
             await react('✅')
         } catch (error) {
-            console.error('[Video Plugin Error]', error)
+            console.error('[YT Plugin Error]', error)
             await react('❌')
-            await reply(`❌ Failed to download video.\n\n*Reason:* ${error.message}`)
+            await reply(`❌ Failed to download.\n\n*Reason:* ${error.message}`)
         }
     }
 }
