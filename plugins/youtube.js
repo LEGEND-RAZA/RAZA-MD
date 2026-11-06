@@ -1,22 +1,35 @@
 import os from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
-import axios from 'axios'
-import yts from 'yt-search'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import ffmpegPath from 'ffmpeg-static'
-import ffprobeStatic from 'ffprobe-static'
 
 const execFileAsync = promisify(execFile)
 
+// ==========================================
+// SAFE DYNAMIC IMPORTS
+// This ensures the plugin ALWAYS loads, even if packages are missing.
+// ==========================================
+let axios, yts, ffmpegPath, ffprobeStatic
+let libError = null
+
+try {
+    axios = (await import('axios')).default
+    yts = (await import('yt-search')).default
+    ffmpegPath = (await import('ffmpeg-static')).default
+    ffprobeStatic = (await import('ffprobe-static')).default
+} catch (err) {
+    libError = err.message
+    console.error('[YouTube Plugin] Dependency error:', err.message)
+}
+
 const FFMPEG_PATH = ffmpegPath || 'ffmpeg'
-const FFPROBE_PATH = ffprobeStatic.path || 'ffprobe'
+const FFPROBE_PATH = ffprobeStatic?.path || 'ffprobe'
 
 const USER_AGENT = 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36'
 const JSON_TIMEOUT_MS = 18_000
 const DOWNLOAD_TIMEOUT_MS = 75_000
-const MAX_VIDEO_BYTES = 60 * 1024 * 1024 // 60MB limit to protect Heroku memory
+const MAX_VIDEO_BYTES = 60 * 1024 * 1024
 const MIN_VIDEO_BYTES = 16 * 1024
 
 const PIPED_APIS = (process.env.YOUTUBE_PIPED_APIS || [
@@ -268,7 +281,6 @@ async function validateAndRemux(buffer) {
             if (needsTranscode) {
                 throw new Error(`unsupported codec ${videoStream.codec_name || 'unknown'} & conversion failed: ${error.message}`)
             }
-            console.error('[video] faststart remux skipped:', error.message)
             return buffer
         }
     } finally {
@@ -310,60 +322,69 @@ async function resolveAndDownloadVideo(url) {
             console.error(`[video] ${name} resolver failed:`, error.message)
             continue
         }
-        if (!candidates.length) {
-            console.error(`[video] ${name} returned no usable MP4 URL`)
-            continue
-        }
+        if (!candidates.length) continue
 
         try {
             return await downloadFirstPlayable(candidates)
         } catch (error) {
             lastError = error
-            console.error(`[video] ${name} candidates were not playable:`, error.message)
         }
     }
-
     throw lastError || new Error('No downloader returned a usable MP4')
 }
 
 
-/* =========================================
- * BOT PLUGIN EXPORT
- * ========================================= */
+// ==========================================
+// PLUGIN EXPORT
+// ==========================================
 export default {
-    command: ['video', 'play', 'song'],
+    command: ['video', 'ytvideo', 'ytv'],
     category: 'downloader',
 
-    async run({ sock, message, isGroup, isOwner }) {
-        const jid = message?.key?.remoteJid
+    async run(ctx) {
+        // 1. Safe context extraction
+        const { sock, message, isGroup, isOwner } = ctx
+        const msg = message || ctx.msg
+        if (!sock || !msg) return
+
+        const jid = msg.key?.remoteJid
         if (!jid) return
 
-        const reply = (text) => sock.sendMessage(jid, { text }, { quoted: message })
+        const reply = (text) => sock.sendMessage(jid, { text }, { quoted: msg })
 
-        // Safely extract the text from the message
-        const fullText = message.message?.conversation || 
-                         message.message?.extendedTextMessage?.text || 
-                         message.message?.imageMessage?.caption || 
-                         message.message?.videoMessage?.caption || ''
-        
-        // Extract command and query
-        const prefix = process.env.PREFIX || '.'
-        const commandUsed = fullText.split(' ')[0].replace(prefix, '')
-        const query = fullText.replace(prefix + commandUsed, '').trim()
+        // 2. Safely check if dependencies loaded
+        if (libError) {
+            return reply(`❌ Plugin failed to load dependencies.\n\n*Reason:* ${libError}\n\nPlease run: npm install axios yt-search ffprobe-static ffmpeg-static`)
+        }
 
-        if (!query) {
-            return reply(`Provide video name\nExample: ${prefix}${commandUsed} Alan Walker Lily`)
+        // 3. Extract the query text safely
+        // Tries ctx.text first, then falls back to parsing the message directly
+        let text = ctx.text || ''
+        let prefix = ctx.prefix || '.'
+        let command = ctx.command || 'video'
+
+        if (!text) {
+            const fullText = msg.message?.conversation || 
+                             msg.message?.extendedTextMessage?.text || 
+                             msg.message?.imageMessage?.caption || 
+                             msg.message?.videoMessage?.caption || ''
+            text = fullText.replace(prefix + command, '').trim()
+        }
+
+        if (!text) {
+            return reply(`Provide video name\nExample: ${prefix}${command} Alan Walker Lily`)
         }
 
         try {
-            await sock.sendMessage(jid, { react: { text: '🔎', key: message.key } }).catch(() => {})
+            console.log(`[Video Plugin] Executing for query: "${text}"`)
+            await sock.sendMessage(jid, { react: { text: '🔎', key: msg.key } }).catch(() => {})
 
-            const result = await yts(query)
+            const result = await yts(text)
             const videos = Array.isArray(result?.videos) ? result.videos : []
             const vid = videos[0]
             
             if (!vid?.url) {
-                await sock.sendMessage(jid, { react: { text: '😕', key: message.key } }).catch(() => {})
+                await sock.sendMessage(jid, { react: { text: '😕', key: msg.key } }).catch(() => {})
                 return reply('No video found')
             }
 
@@ -372,7 +393,7 @@ export default {
             const duration = String(vid.timestamp || 'Unknown')
             const views = Number(vid.views || 0).toLocaleString()
 
-            await sock.sendMessage(jid, { react: { text: '⬇️', key: message.key } }).catch(() => {})
+            await sock.sendMessage(jid, { react: { text: '⬇️', key: msg.key } }).catch(() => {})
             await sock.sendMessage(jid, {
                 image: { url: vid.thumbnail },
                 caption:
@@ -381,7 +402,7 @@ export default {
                     `👁️ Views: ${views}\n` +
                     `📢 Channel: ${author}\n\n` +
                     `⏳ Downloading...`,
-            }, { quoted: message }).catch(() => {})
+            }, { quoted: msg }).catch(() => {})
 
             const { video } = await resolveAndDownloadVideo(vid.url)
             
@@ -389,12 +410,12 @@ export default {
                 video,
                 mimetype: 'video/mp4',
                 caption: `🎬 *${title}*\n⏱️ ${duration}`,
-            }, { quoted: message })
+            }, { quoted: msg })
 
-            await sock.sendMessage(jid, { react: { text: '✅', key: message.key } }).catch(() => {})
+            await sock.sendMessage(jid, { react: { text: '✅', key: msg.key } }).catch(() => {})
         } catch (error) {
-            console.error('[video command]', error.message)
-            await sock.sendMessage(jid, { react: { text: '❌', key: message.key } }).catch(() => {})
+            console.error('[Video Plugin Error]', error.message)
+            await sock.sendMessage(jid, { react: { text: '❌', key: msg.key } }).catch(() => {})
             await reply(`❌ Failed to download video.\n\n*Reason:* ${error.message}`)
         }
     }
