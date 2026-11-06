@@ -129,11 +129,6 @@ export default {
           '⚠️ ᴜꜱᴀɢᴇ: .ꜱᴇᴛᴠᴀʀ KEY=value [KEY2=value2 …]')
       }
 
-      const preview = keys.map(k => `│ ${k} = ${maskValue(k, vars[k])}`).join('\n')
-
-      await reply(sock, jid, message,
-        `⚙️ ꜱᴇᴛᴛɪɴɢ ${keys.length} ᴠᴀʀ(ꜱ)…\n\n${preview}\n\nᴛʜᴇ ʙᴏᴛ ᴡɪʟʟ ʀᴇꜱᴛᴀʀᴛ ɪɴ 5-30ꜱ`)
-
       try {
         await patchVars(vars)
         console.log(`[HEROKUVAR] Set: ${keys.join(', ')}`)
@@ -162,9 +157,6 @@ export default {
 
       const payload = {}
       for (const k of keys) payload[k] = null
-
-      await reply(sock, jid, message,
-        `⚙️ ᴅᴇʟᴇᴛɪɴɢ ${keys.length} ᴠᴀʀ(ꜱ)…\n\n${keys.map(k => `• ${k}`).join('\n')}\n\nᴛʜᴇ ʙᴏᴛ ᴡɪʟʟ ʀᴇꜱᴛᴀʀᴛ ɪɴ 5-30ꜱ`)
 
       try {
         await patchVars(payload)
