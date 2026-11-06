@@ -611,6 +611,52 @@ async function createSocket() {
 
     for (const message of event.messages || []) rememberSent(message)
 
+    // ==========================================
+    // STICKER / EMOJI COMMAND TRIGGER
+    // ==========================================
+    try {
+      const dbFile = path.join(process.cwd(), 'database', 'sticker_cmds.json')
+      if (fs.existsSync(dbFile)) {
+        const db = JSON.parse(fs.readFileSync(dbFile, 'utf8'))
+        
+        for (const message of event.messages || []) {
+          let triggeredCmd = null
+          
+          // Check Stickers
+          if (message.message?.stickerMessage) {
+            const hashBuf = message.message.stickerMessage.fileSha256
+            const hash = hashBuf ? Buffer.from(hashBuf).toString('hex') : ''
+            if (db.stickers && db.stickers[hash]) {
+              triggeredCmd = db.stickers[hash]
+            }
+          }
+          
+          // Check Emojis
+          if (!triggeredCmd) {
+            const text = message.message?.conversation || message.message?.extendedTextMessage?.text || ''
+            const cleanText = text.trim()
+            const emojiRegex = /^(\u00a9|\u00ae|[\u2000-\u3300]|\ud83c[\ud000-\udfff]|\ud83d[\ud000-\udfff]|\ud83e[\ud000-\udfff])+$/
+            if (cleanText && emojiRegex.test(cleanText) && db.emojis && db.emojis[cleanText]) {
+              triggeredCmd = db.emojis[cleanText]
+            }
+          }
+
+          // Convert to text command and inject
+          if (triggeredCmd) {
+            const prefix = process.env.PREFIX || '.'
+            const fakeText = `${prefix}${triggeredCmd}`
+            
+            // Overwrite message payload to simulate a text command
+            message.message = { conversation: fakeText }
+            console.log(`[STICKER CMD] Triggered ${fakeText}`)
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[STICKER CMD ERROR]', err.message)
+    }
+    // ==========================================
+
     try {
       await handleMessages(event, s, plugins, messageListeners)
     } catch (error) {
