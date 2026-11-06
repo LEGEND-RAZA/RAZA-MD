@@ -5,6 +5,7 @@
   "type": "module",
   "main": "index.js",
   "scripts": {
+    "postinstall": "node scripts/get-ytdlp.js",
     "start": "node --env-file=config.env index.js"
   },
   "engines": {
