@@ -3,7 +3,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import ytDlp from 'yt-dlp-exec'
 import yts from 'yt-search'
 import ffmpegStatic from 'ffmpeg-static'
 import ffprobeStatic from 'ffprobe-static'
@@ -15,7 +14,32 @@ const FFPROBE_PATH = ffprobeStatic?.path || 'ffprobe'
 const MAX_VIDEO_BYTES = 60 * 1024 * 1024
 const MIN_VIDEO_BYTES = 16 * 1024
 const MAX_DURATION_SEC = 20 * 60
-const COOKIES_FILE = process.env.YOUTUBE_COOKIES || '' // optional path to cookies.txt
+const COOKIES_FILE = process.env.YOUTUBE_COOKIES || ''
+
+// ---------- yt-dlp binary (downloaded on first use, no Python needed) ----------
+const BIN_DIR = path.join(process.cwd(), 'bin')
+const BIN_PATH = path.join(BIN_DIR, 'yt-dlp')
+let binReady = null
+
+async function ensureYtDlp() {
+    if (process.env.YTDLP_PATH) return process.env.YTDLP_PATH
+    if (process.platform !== 'linux') return 'yt-dlp' // must be installed on PATH
+    if (fs.existsSync(BIN_PATH)) return BIN_PATH
+
+    if (!binReady) {
+        binReady = (async () => {
+            const file = process.arch === 'arm64' ? 'yt-dlp_linux_aarch64' : 'yt-dlp_linux'
+            const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${file}`
+            const res = await fetch(url, { redirect: 'follow' })
+            if (!res.ok) throw new Error(`yt-dlp download failed: HTTP ${res.status}`)
+            await fs.promises.mkdir(BIN_DIR, { recursive: true })
+            await fs.promises.writeFile(BIN_PATH, Buffer.from(await res.arrayBuffer()))
+            await fs.promises.chmod(BIN_PATH, 0o755)
+            return BIN_PATH
+        })().finally(() => { binReady = null })
+    }
+    return binReady
+}
 
 async function searchYouTube(query) {
     const res = await yts(query)
@@ -36,52 +60,52 @@ function fmtDuration(sec) {
     return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`
 }
 
-async function runYtDlp(url, outputTemplate, quality, extra) {
-    await ytDlp(url, {
-        output: outputTemplate,
-        format: `bv*[height<=${quality}][ext=mp4]+ba[ext=m4a]/b[height<=${quality}][ext=mp4]/bv*[height<=${quality}]+ba/b[height<=${quality}]/b`,
-        mergeOutputFormat: 'mp4',
-        noPlaylist: true,
-        noWarnings: true,
-        noCheckCertificates: true,
-        maxFilesize: '60M',
-        ffmpegLocation: FFMPEG_PATH,
-        ...(COOKIES_FILE ? { cookies: COOKIES_FILE } : {}),
-        ...extra,
-    })
+async function runYtDlp(bin, url, template, quality, extraArgs) {
+    const args = [
+        '-o', template,
+        '-f', `bv*[height<=${quality}][ext=mp4]+ba[ext=m4a]/b[height<=${quality}][ext=mp4]/bv*[height<=${quality}]+ba/b[height<=${quality}]/b`,
+        '--merge-output-format', 'mp4',
+        '--no-playlist',
+        '--no-warnings',
+        '--no-check-certificates',
+        '--max-filesize', '60M',
+        '--ffmpeg-location', FFMPEG_PATH,
+        ...(COOKIES_FILE ? ['--cookies', COOKIES_FILE] : []),
+        ...extraArgs,
+        url,
+    ]
+    await execFileAsync(bin, args, { timeout: 150_000, maxBuffer: 10 * 1024 * 1024 })
 }
 
-async function downloadWithYtDlp(url, quality = 720) {
+async function downloadVideo(url, quality = 720) {
+    const bin = await ensureYtDlp()
     const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'yt-dlp-'))
     const template = path.join(tempDir, 'video.%(ext)s')
 
     try {
-        // Different player clients work on different servers, so try several
         const attempts = [
-            { jsRuntimes: 'node', extractorArgs: 'youtube:player_client=default,mweb' },
-            { extractorArgs: 'youtube:player_client=android,web' },
-            { extractorArgs: 'youtube:player_client=ios' },
-            {},
+            ['--js-runtimes', `node:${process.execPath}`, '--extractor-args', 'youtube:player_client=default,mweb'],
+            ['--extractor-args', 'youtube:player_client=android,web'],
+            ['--extractor-args', 'youtube:player_client=ios'],
+            [],
         ]
 
         let lastError = null
         let file = null
         for (const extra of attempts) {
             try {
-                await runYtDlp(url, template, quality, extra)
+                await runYtDlp(bin, url, template, quality, extra)
                 const files = await fs.promises.readdir(tempDir)
                 const found = files.find(f => f.startsWith('video.') && !f.endsWith('.part'))
                 if (found) { file = path.join(tempDir, found); break }
             } catch (err) {
                 lastError = err
-                const msg = String(err.stderr || err.message || '')
-                console.error('[Video Plugin] attempt failed:', msg.split('\n').slice(-3).join(' | '))
+                console.error('[Video Plugin] attempt failed:', String(err.stderr || err.message).split('\n').filter(Boolean).slice(-3).join(' | '))
             }
         }
 
         if (!file) {
-            const detail = String(lastError?.stderr || lastError?.message || 'unknown error')
-                .split('\n').filter(Boolean).pop()
+            const detail = String(lastError?.stderr || lastError?.message || 'unknown error').split('\n').filter(Boolean).pop()
             throw new Error(`yt-dlp failed: ${detail}`)
         }
 
@@ -178,7 +202,7 @@ export default {
                 await reply(caption)
             }
 
-            const videoBuffer = await downloadWithYtDlp(vid.url)
+            const videoBuffer = await downloadVideo(vid.url)
 
             await sock.sendMessage(jid, {
                 video: videoBuffer,
