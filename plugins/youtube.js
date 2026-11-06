@@ -8,16 +8,17 @@ const execFileAsync = promisify(execFile)
 
 // ==========================================
 // SAFE DYNAMIC IMPORTS
-// This ensures the plugin ALWAYS loads, even if packages are missing.
+// We removed 'yt-search' entirely. Only axios and ffprobe are needed.
 // ==========================================
-let axios, yts, ffmpegPath, ffprobeStatic
+let axios, ffmpegPath, ffprobeStatic
 let libError = null
 
 try {
     axios = (await import('axios')).default
-    yts = (await import('yt-search')).default
-    ffmpegPath = (await import('ffmpeg-static')).default
-    ffprobeStatic = (await import('ffprobe-static')).default
+    const ffmpegMod = await import('ffmpeg-static')
+    ffmpegPath = ffmpegMod.default || ffmpegMod
+    const ffprobeMod = await import('ffprobe-static')
+    ffprobeStatic = ffprobeMod.default || ffprobeMod
 } catch (err) {
     libError = err.message
     console.error('[YouTube Plugin] Dependency error:', err.message)
@@ -139,6 +140,36 @@ async function getJson(url, options = {}) {
     if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`)
     if (typeof response.data === 'string' && /^\s*</.test(response.data)) throw new Error('provider returned HTML instead of JSON')
     return response.data
+}
+
+// ==========================================
+// SEARCH FUNCTION (Replaces yt-search)
+// ==========================================
+async function searchYouTube(query) {
+    for (const api of PIPED_APIS) {
+        try {
+            const data = await getJson(`${api}/search`, { 
+                params: { q: query, filter: 'videos' },
+                timeout: 10_000
+            })
+            if (data?.items?.length > 0) {
+                const v = data.items.find(item => item.type === 'stream' || item.url?.includes('/watch'))
+                if (v) {
+                    return {
+                        url: v.url.startsWith('http') ? v.url : `https://www.youtube.com${v.url}`,
+                        title: v.title || 'YouTube Video',
+                        thumbnail: v.thumbnail || '',
+                        author: v.uploaderName || 'Unknown',
+                        duration: v.duration || 0,
+                        views: v.views || 0
+                    }
+                }
+            }
+        } catch (err) {
+            console.error(`[video] Piped search failed on ${api}:`, err.message)
+        }
+    }
+    return null
 }
 
 async function fromOfficialHector(url) {
@@ -333,7 +364,6 @@ async function resolveAndDownloadVideo(url) {
     throw lastError || new Error('No downloader returned a usable MP4')
 }
 
-
 // ==========================================
 // PLUGIN EXPORT
 // ==========================================
@@ -342,7 +372,6 @@ export default {
     category: 'downloader',
 
     async run(ctx) {
-        // 1. Safe context extraction
         const { sock, message, isGroup, isOwner } = ctx
         const msg = message || ctx.msg
         if (!sock || !msg) return
@@ -352,13 +381,10 @@ export default {
 
         const reply = (text) => sock.sendMessage(jid, { text }, { quoted: msg })
 
-        // 2. Safely check if dependencies loaded
         if (libError) {
-            return reply(`❌ Plugin failed to load dependencies.\n\n*Reason:* ${libError}\n\nPlease run: npm install axios yt-search ffprobe-static ffmpeg-static`)
+            return reply(`❌ Plugin failed to load dependencies.\n\n*Reason:* ${libError}\n\nPlease run: npm install axios ffprobe-static ffmpeg-static`)
         }
 
-        // 3. Extract the query text safely
-        // Tries ctx.text first, then falls back to parsing the message directly
         let text = ctx.text || ''
         let prefix = ctx.prefix || '.'
         let command = ctx.command || 'video'
@@ -379,9 +405,7 @@ export default {
             console.log(`[Video Plugin] Executing for query: "${text}"`)
             await sock.sendMessage(jid, { react: { text: '🔎', key: msg.key } }).catch(() => {})
 
-            const result = await yts(text)
-            const videos = Array.isArray(result?.videos) ? result.videos : []
-            const vid = videos[0]
+            const vid = await searchYouTube(text)
             
             if (!vid?.url) {
                 await sock.sendMessage(jid, { react: { text: '😕', key: msg.key } }).catch(() => {})
@@ -389,8 +413,8 @@ export default {
             }
 
             const title = String(vid.title || 'YouTube Video')
-            const author = String(vid.author?.name || 'Unknown')
-            const duration = String(vid.timestamp || 'Unknown')
+            const author = String(vid.author || 'Unknown')
+            const duration = vid.duration ? `${Math.floor(vid.duration / 60)}:${(vid.duration % 60).toString().padStart(2, '0')}` : 'Unknown'
             const views = Number(vid.views || 0).toLocaleString()
 
             await sock.sendMessage(jid, { react: { text: '⬇️', key: msg.key } }).catch(() => {})
