@@ -14,33 +14,86 @@ const FFPROBE_PATH = ffprobeStatic?.path || 'ffprobe'
 const MAX_VIDEO_BYTES = 60 * 1024 * 1024
 const MIN_VIDEO_BYTES = 16 * 1024
 const MAX_DURATION_SEC = 20 * 60
-const COOKIES_FILE = process.env.YOUTUBE_COOKIES || ''
+const BIN_MAX_AGE_MS = 3 * 24 * 60 * 60 * 1000
 
-// ---------- yt-dlp binary (downloaded on first use, no Python needed) ----------
+// ---------- Cookies ----------
+let cookiesPath = null
+function getCookiesFile() {
+    if (cookiesPath && fs.existsSync(cookiesPath)) return cookiesPath
+
+    let value = process.env.YOUTUBE_COOKIES_B64
+        ? Buffer.from(process.env.YOUTUBE_COOKIES_B64, 'base64').toString('utf8')
+        : (process.env.YOUTUBE_COOKIES || '')
+    if (!value) return null
+
+    // Value may be a path to a cookies file
+    if (!value.includes('\n') && !value.includes('=') && fs.existsSync(value)) {
+        value = fs.readFileSync(value, 'utf8')
+    }
+    value = value.replace(/\\n/g, '\n').trim()
+
+    // Convert "a=b; c=d" header format into Netscape format
+    if (!/youtube\.com\t/.test(value)) {
+        const lines = ['# Netscape HTTP Cookie File']
+        for (const part of value.split(';')) {
+            const i = part.indexOf('=')
+            if (i < 1) continue
+            const name = part.slice(0, i).trim()
+            const val = part.slice(i + 1).trim()
+            lines.push(`.youtube.com\tTRUE\t/\tTRUE\t2147483647\t${name}\t${val}`)
+        }
+        if (lines.length < 2) {
+            console.error('[Video Plugin] Cookies invalid')
+            return null
+        }
+        value = lines.join('\n')
+    }
+
+    cookiesPath = path.join(os.tmpdir(), 'yt-cookies.txt')
+    fs.writeFileSync(cookiesPath, value + '\n')
+    console.log('[Video Plugin] Cookies loaded')
+    return cookiesPath
+}
+
+// ---------- yt-dlp binary (auto-downloaded, no Python needed) ----------
 const BIN_DIR = path.join(process.cwd(), 'bin')
 const BIN_PATH = path.join(BIN_DIR, 'yt-dlp')
-let binReady = null
+let binPromise = null
+
+async function downloadBinary() {
+    const file = process.arch === 'arm64' ? 'yt-dlp_linux_aarch64' : 'yt-dlp_linux'
+    const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${file}`
+    const res = await fetch(url, { redirect: 'follow' })
+    if (!res.ok) throw new Error(`yt-dlp download failed: HTTP ${res.status}`)
+    await fs.promises.mkdir(BIN_DIR, { recursive: true })
+    const tmp = BIN_PATH + '.tmp'
+    await fs.promises.writeFile(tmp, Buffer.from(await res.arrayBuffer()))
+    await fs.promises.chmod(tmp, 0o755)
+    await fs.promises.rename(tmp, BIN_PATH)
+    console.log('[Video Plugin] yt-dlp binary updated')
+}
 
 async function ensureYtDlp() {
     if (process.env.YTDLP_PATH) return process.env.YTDLP_PATH
     if (process.platform !== 'linux') return 'yt-dlp' // must be installed on PATH
-    if (fs.existsSync(BIN_PATH)) return BIN_PATH
 
-    if (!binReady) {
-        binReady = (async () => {
-            const file = process.arch === 'arm64' ? 'yt-dlp_linux_aarch64' : 'yt-dlp_linux'
-            const url = `https://github.com/yt-dlp/yt-dlp/releases/latest/download/${file}`
-            const res = await fetch(url, { redirect: 'follow' })
-            if (!res.ok) throw new Error(`yt-dlp download failed: HTTP ${res.status}`)
-            await fs.promises.mkdir(BIN_DIR, { recursive: true })
-            await fs.promises.writeFile(BIN_PATH, Buffer.from(await res.arrayBuffer()))
-            await fs.promises.chmod(BIN_PATH, 0o755)
-            return BIN_PATH
-        })().finally(() => { binReady = null })
+    const exists = fs.existsSync(BIN_PATH)
+    const fresh = exists && Date.now() - fs.statSync(BIN_PATH).mtimeMs < BIN_MAX_AGE_MS
+    if (fresh) return BIN_PATH
+
+    if (!binPromise) {
+        binPromise = downloadBinary()
+            .catch(err => {
+                if (!exists) throw err
+                console.error('[Video Plugin] yt-dlp update failed, using old binary:', err.message)
+            })
+            .finally(() => { binPromise = null })
     }
-    return binReady
+    await binPromise
+    return BIN_PATH
 }
 
+// ---------- Search ----------
 async function searchYouTube(query) {
     const res = await yts(query)
     const v = res.videos?.[0]
@@ -60,7 +113,9 @@ function fmtDuration(sec) {
     return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`
 }
 
+// ---------- Download ----------
 async function runYtDlp(bin, url, template, quality, extraArgs) {
+    const cookies = getCookiesFile()
     const args = [
         '-o', template,
         '-f', `bv*[height<=${quality}][ext=mp4]+ba[ext=m4a]/b[height<=${quality}][ext=mp4]/bv*[height<=${quality}]+ba/b[height<=${quality}]/b`,
@@ -70,7 +125,8 @@ async function runYtDlp(bin, url, template, quality, extraArgs) {
         '--no-check-certificates',
         '--max-filesize', '60M',
         '--ffmpeg-location', FFMPEG_PATH,
-        ...(COOKIES_FILE ? ['--cookies', COOKIES_FILE] : []),
+        ...(cookies ? ['--cookies', cookies] : []),
+        ...(process.env.YTDLP_PROXY ? ['--proxy', process.env.YTDLP_PROXY] : []),
         ...extraArgs,
         url,
     ]
@@ -150,6 +206,7 @@ async function ensureWhatsAppMp4(inputPath, dir) {
     return fixed
 }
 
+// ---------- Plugin ----------
 export default {
     command: ['video', 'ytvideo', 'ytv'],
     category: 'downloader',
