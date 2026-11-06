@@ -4,12 +4,12 @@ import path from 'node:path'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
+// Use yt-dlp-exec for reliable downloading
+import ytDlp from 'yt-dlp-exec'
+
 const execFileAsync = promisify(execFile)
 
-// ==========================================
-// SAFE DYNAMIC IMPORTS
-// We removed 'yt-search' entirely. Only axios and ffprobe are needed.
-// ==========================================
+// Safe dynamic imports for other dependencies
 let axios, ffmpegPath, ffprobeStatic
 let libError = null
 
@@ -143,7 +143,7 @@ async function getJson(url, options = {}) {
 }
 
 // ==========================================
-// SEARCH FUNCTION (Replaces yt-search)
+// SEARCH FUNCTION (Using Piped API)
 // ==========================================
 async function searchYouTube(query) {
     for (const api of PIPED_APIS) {
@@ -172,97 +172,60 @@ async function searchYouTube(query) {
     return null
 }
 
-async function fromOfficialHector(url) {
-    const data = await getJson('https://yt-dl.officialhectormanuel.workers.dev/', { params: { url } })
-    return collectMediaUrls(data)
-}
+// ==========================================
+// DOWNLOAD FUNCTION (Using yt-dlp)
+// ==========================================
+async function downloadWithYtDlp(url, quality = '720') {
+    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'yt-dlp-'))
+    const outputPath = path.join(tempDir, 'video.mp4')
 
-async function fromDavidCyril(url) {
-    const data = await getJson('https://apis.davidcyril.name.ng/download/ytmp4', { params: { url } })
-    return collectMediaUrls(data)
-}
-
-async function fromEliteProTech(url) {
-    const data = await getJson('https://eliteprotech-apis.zone.id/ytmp4', { params: { url } })
-    return collectMediaUrls(data)
-}
-
-async function fromAgatz(url) {
-    const data = await getJson('https://api.agatz.xyz/api/ytmp4', { params: { url } })
-    return collectMediaUrls(data)
-}
-
-async function fromPrexzy(url) {
-    const data = await getJson('https://prexzyapis.com/download/youtube-video', { params: { url } })
-    return collectMediaUrls(data)
-}
-
-async function fromPiped(url) {
-    const videoId = extractYouTubeId(url)
-    if (!videoId) return []
-
-    for (const api of PIPED_APIS) {
-        try {
-            const data = await getJson(`${api}/streams/${videoId}`, { timeout: 10_000 })
-            const streams = Array.isArray(data?.videoStreams) ? data.videoStreams : []
-            const candidates = streams
-                .filter(stream => isHttpUrl(stream?.url))
-                .filter(stream => /video\/mp4/i.test(String(stream.mimeType || '')))
-                .filter(stream => stream.videoOnly !== true)
-                .map(stream => ({
-                    url: stream.url,
-                    label: `${stream.quality || ''} ${stream.height || ''}p`,
-                }))
-            const ranked = rankMediaCandidates(candidates)
-            if (ranked.length) return ranked
-        } catch (error) {
-            console.error(`[video] Piped provider ${api} failed:`, error.message)
+    try {
+        console.log(`[Video Plugin] Downloading with yt-dlp: ${url}`)
+        
+        // yt-dlp-exec options
+        const options = {
+            output: outputPath,
+            format: `bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]`,
+            mergeOutputFormat: 'mp4',
+            noPlaylist: true,
+            noWarnings: true,
+            noCallHome: true,
+            noCheckCertificate: true,
+            preferFreeFormats: true,
+            youtubeSkipDashManifest: true,
+            referer: 'https://www.youtube.com/',
+            // Use ffmpeg-static if available
+            ...(ffmpegPath ? { ffmpegLocation: path.dirname(ffmpegPath) } : {})
         }
-    }
-    return []
-}
 
-function looksLikeVideo(buffer, contentType) {
-    const type = String(contentType || '').toLowerCase()
-    if (type.includes('text/html') || type.includes('application/json') || type.includes('audio/')) return false
-    if (type.includes('video/')) return true
-    if (!Buffer.isBuffer(buffer) || buffer.length < 12) return false
-    const mp4 = buffer.subarray(4, 8).toString('ascii') === 'ftyp'
-    const webm = buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))
-    return mp4 || webm
-}
+        // Execute yt-dlp
+        await ytDlp(url, options)
 
-async function downloadBinary(url) {
-    let lastError = null
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-            const response = await axios.get(url, {
-                responseType: 'arraybuffer',
-                timeout: DOWNLOAD_TIMEOUT_MS,
-                maxContentLength: MAX_VIDEO_BYTES,
-                maxBodyLength: MAX_VIDEO_BYTES,
-                maxRedirects: 6,
-                headers: {
-                    'User-Agent': USER_AGENT,
-                    Accept: 'video/mp4,video/*;q=0.9,application/octet-stream;q=0.8,*/*;q=0.5',
-                },
-                validateStatus: () => true,
-            })
-            const buffer = Buffer.from(response.data || '')
-            if (response.status >= 200 && response.status < 300
-                && buffer.length >= MIN_VIDEO_BYTES
-                && buffer.length <= MAX_VIDEO_BYTES
-                && looksLikeVideo(buffer, response.headers?.['content-type'])) {
-                return buffer
-            }
-            const type = response.headers?.['content-type'] || 'unknown'
-            throw new Error(`HTTP ${response.status}, ${type}, ${buffer.length} bytes`)
-        } catch (error) {
-            lastError = error
-            if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 700))
+        // Verify the file exists and is valid
+        if (!fs.existsSync(outputPath)) {
+            throw new Error('yt-dlp did not create an output file')
         }
+
+        const stats = await fs.promises.stat(outputPath)
+        if (stats.size < MIN_VIDEO_BYTES) {
+            throw new Error(`Downloaded file is too small (${stats.size} bytes)`)
+        }
+        if (stats.size > MAX_VIDEO_BYTES) {
+            throw new Error(`Downloaded file exceeds limit (${(stats.size / 1024 / 1024).toFixed(1)} MB)`)
+        }
+
+        // Read the file into a buffer
+        const videoBuffer = await fs.promises.readFile(outputPath)
+
+        // Verify it's a valid video using ffprobe
+        await validateAndRemux(videoBuffer)
+
+        return videoBuffer
+
+    } finally {
+        // Clean up temporary files
+        await fs.promises.rm(tempDir, { recursive: true, force: true }).catch(() => {})
     }
-    throw lastError || new Error('download failed')
 }
 
 async function validateAndRemux(buffer) {
@@ -306,7 +269,7 @@ async function validateAndRemux(buffer) {
         try {
             await execFileAsync(FFMPEG_PATH, ffmpegArgs, { timeout: 180_000 })
             const fixed = await fs.promises.readFile(fixedPath)
-            if (fixed.length >= MIN_VIDEO_BYTES && looksLikeVideo(fixed, 'video/mp4')) return fixed
+            if (fixed.length >= MIN_VIDEO_BYTES) return fixed
             throw new Error('ffmpeg produced an empty or invalid MP4')
         } catch (error) {
             if (needsTranscode) {
@@ -317,51 +280,6 @@ async function validateAndRemux(buffer) {
     } finally {
         await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {})
     }
-}
-
-async function downloadFirstPlayable(candidates) {
-    let lastError = null
-    for (const candidate of candidates) {
-        try {
-            const raw = await downloadBinary(candidate.url)
-            const video = await validateAndRemux(raw)
-            return { video, source: candidate.url }
-        } catch (error) {
-            lastError = error
-            console.error(`[video] candidate failed (${candidate.label || candidate.url}):`, error.message)
-        }
-    }
-    throw lastError || new Error('No playable video candidate')
-}
-
-async function resolveAndDownloadVideo(url) {
-    const providers = [
-        ['official-hector', fromOfficialHector],
-        ['david-cyril', fromDavidCyril],
-        ['piped', fromPiped],
-        ['eliteprotech', fromEliteProTech],
-        ['agatz', fromAgatz],
-        ['prexzy', fromPrexzy],
-    ]
-    let lastError = null
-
-    for (const [name, provider] of providers) {
-        let candidates
-        try {
-            candidates = await provider(url)
-        } catch (error) {
-            console.error(`[video] ${name} resolver failed:`, error.message)
-            continue
-        }
-        if (!candidates.length) continue
-
-        try {
-            return await downloadFirstPlayable(candidates)
-        } catch (error) {
-            lastError = error
-        }
-    }
-    throw lastError || new Error('No downloader returned a usable MP4')
 }
 
 // ==========================================
@@ -382,7 +300,7 @@ export default {
         const reply = (text) => sock.sendMessage(jid, { text }, { quoted: msg })
 
         if (libError) {
-            return reply(`❌ Plugin failed to load dependencies.\n\n*Reason:* ${libError}\n\nPlease run: npm install axios ffprobe-static ffmpeg-static`)
+            return reply(`❌ Plugin failed to load dependencies.\n\n*Reason:* ${libError}\n\nPlease run: npm install axios ffprobe-static ffmpeg-static yt-dlp-exec`)
         }
 
         let text = ctx.text || ''
@@ -428,10 +346,10 @@ export default {
                     `⏳ Downloading...`,
             }, { quoted: msg }).catch(() => {})
 
-            const { video } = await resolveAndDownloadVideo(vid.url)
+            const videoBuffer = await downloadWithYtDlp(vid.url)
             
             await sock.sendMessage(jid, {
-                video,
+                video: videoBuffer,
                 mimetype: 'video/mp4',
                 caption: `🎬 *${title}*\n⏱️ ${duration}`,
             }, { quoted: msg })
