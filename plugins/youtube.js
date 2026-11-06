@@ -1,241 +1,401 @@
-/*
- * youtube.js: YouTube downloader using ytdlp-nodejs
- * Robust against SABR, PO-token, and datacenter-IP blocks.
- */
-
-import { spawn } from 'node:child_process'
-import { pipeline } from 'node:stream/promises'
+import os from 'node:os'
+import fs from 'node:fs'
+import path from 'node:path'
+import axios from 'axios'
+import yts from 'yt-search'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import ffmpegPath from 'ffmpeg-static'
-import { YtDlp } from 'ytdlp-nodejs'
+import ffprobeStatic from 'ffprobe-static'
 
-const ytdlp = new YtDlp()
+const execFileAsync = promisify(execFile)
 
-const CFG = {
-  maxMB: Number(process.env.YT_MAX_MB) || 60,
-  maxAudioMin: Number(process.env.YT_MAX_AUDIO_MIN) || 30,
-  maxVideoMin: Number(process.env.YT_MAX_VIDEO_MIN) || 15,
-  videoQuality: String(process.env.YT_VIDEO_QUALITY || '360'),
-  // Optional: If you upload a cookies.txt file to Heroku, set the path here
-  cookieFile: process.env.YT_COOKIE_FILE || null, 
-  downloadTimeoutMs: Number(process.env.YT_DOWNLOAD_TIMEOUT_MS) || 180000
+const FFMPEG_PATH = ffmpegPath || 'ffmpeg'
+const FFPROBE_PATH = ffprobeStatic.path || 'ffprobe'
+
+const USER_AGENT = 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36'
+const JSON_TIMEOUT_MS = 18_000
+const DOWNLOAD_TIMEOUT_MS = 75_000
+const MAX_VIDEO_BYTES = 60 * 1024 * 1024 // 60MB limit to protect Heroku memory
+const MIN_VIDEO_BYTES = 16 * 1024
+
+const PIPED_APIS = (process.env.YOUTUBE_PIPED_APIS || [
+    'https://pipedapi.kavin.rocks',
+    'https://pipedapi-libre.kavin.rocks',
+    'https://pipedapi.adminforge.de',
+    'https://api.piped.yt',
+    'https://pipedapi.owo.si',
+    'https://pipedapi.ducks.party',
+    'https://piped-api.codespace.cz',
+    'https://pipedapi.reallyaweso.me',
+].join(','))
+    .split(',')
+    .map(value => value.trim().replace(/\/$/, ''))
+    .filter(Boolean)
+
+function isHttpUrl(value) {
+    return typeof value === 'string' && /^https?:\/\//i.test(value.trim())
 }
 
-const QUALITIES = ['144', '240', '360', '480', '720', '1080']
-
-/* ---------- helpers ---------- */
-
-const safeName = s =>
-  String(s || 'youtube').replace(/[\\/:*?"<>|\n\r]+/g, ' ').trim().slice(0, 80) || 'youtube'
-
-function withTimeout(promise, ms) {
-  let timer
-  const timeout = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`timed out after ${Math.round(ms / 1000)}s`)), ms)
-  })
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+function isYouTubeSourceUrl(value) {
+    return /(?:youtube\.com|youtu\.be|youtube-nocookie\.com)/i.test(value)
 }
 
-function extractVideoId(text) {
-  const m = String(text || '').match(
-    /(?:youtu\.be\/|youtube\.com\/(?:watch\?(?:[^\s#]*&)?v=|shorts\/|embed\/|live\/|v\/))([\w-]{11})/i
-  )
-  return m?.[1] || null
+function isImageOrAudioUrl(value, keyPath) {
+    const lowerUrl = value.toLowerCase().split('?')[0]
+    const lowerPath = keyPath.toLowerCase()
+    return /(?:thumbnail|thumb|image|avatar|cover|poster|audio|music|song)/i.test(lowerPath)
+        || /\.(?:jpe?g|png|webp|gif|svg|mp3|m4a|ogg|wav)(?:$|[?#])/i.test(lowerUrl)
 }
 
-async function searchYouTube(query) {
-  const results = await ytdlp.search(query, { maxResults: 1 })
-  if (!results || results.length === 0) return null
-  const v = results[0]
-  return {
-    id: v.id,
-    title: v.title || 'YouTube Video',
-    duration: v.duration_string || '',
-    seconds: v.duration || 0
-  }
+function mediaQuality(label, url) {
+    const match = `${label || ''} ${url || ''}`.match(/(?:^|[^0-9])(144|240|360|480|540|720|1080|1440|2160|4320)p?(?:[^0-9]|$)/i)
+    return match ? Number(match[1]) : 0
 }
 
-async function lookupLink(id) {
-  const info = await ytdlp.getInfo(`https://www.youtube.com/watch?v=${id}`)
-  return {
-    id,
-    title: info.title || 'YouTube Video',
-    duration: info.duration_string || '',
-    seconds: info.duration || 0
-  }
-}
-
-/* ---------- download via yt-dlp ---------- */
-
-async function downloadAudio(url) {
-  const args = { format: 'bestaudio/best' }
-  if (CFG.cookieFile) args.cookies = CFG.cookieFile
-
-  const stream = await ytdlp.stream(url, args)
-  return await convertToMp3(stream)
-}
-
-async function downloadVideo(url, quality) {
-  const args = { 
-    format: `bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]`,
-    mergeOutputFormat: 'mp4'
-  }
-  if (CFG.cookieFile) args.cookies = CFG.cookieFile
-
-  const stream = await ytdlp.stream(url, args)
-  return await collectStream(stream)
-}
-
-/* ---------- stream processing ---------- */
-
-async function convertToMp3(nodeStream) {
-  if (!ffmpegPath) throw new Error('ffmpeg-static not found')
-
-  const ffmpeg = spawn(ffmpegPath, [
-    '-i', 'pipe:0',
-    '-vn',
-    '-acodec', 'libmp3lame',
-    '-f', 'mp3',
-    'pipe:1'
-  ])
-
-  const chunks = []
-  let total = 0
-  let stderrTail = ''
-
-  ffmpeg.stdout.on('data', chunk => {
-    total += chunk.length
-    if (total > CFG.maxMB * 1048576) {
-      try { ffmpeg.kill('SIGKILL') } catch {}
-      return
+function rankMediaCandidates(candidates) {
+    const deduped = new Map()
+    for (const candidate of candidates) {
+        if (!isHttpUrl(candidate?.url) || isYouTubeSourceUrl(candidate.url)) continue
+        const url = candidate.url.trim()
+        if (!deduped.has(url)) {
+            deduped.set(url, {
+                url,
+                label: String(candidate.label || ''),
+                quality: mediaQuality(candidate.label, url),
+            })
+        }
     }
-    chunks.push(chunk)
-  })
 
-  ffmpeg.stderr.on('data', chunk => {
-    stderrTail = (stderrTail + chunk.toString()).slice(-2000)
-  })
-
-  // ytdlp-nodejs returns a Node stream, so we pipe it directly to ffmpeg
-  const input = pipeline(nodeStream, ffmpeg.stdin).catch(err => {
-    if (err?.code !== 'EPIPE' && err?.code !== 'ERR_STREAM_PREMATURE_CLOSE') throw err
-  })
-
-  const exit = new Promise((resolve, reject) => {
-    ffmpeg.on('close', code => {
-      if (code === 0) resolve()
-      else reject(new Error(`ffmpeg exited with ${code}: ${stderrTail}`))
+    return [...deduped.values()].sort((a, b) => {
+        const aPreferred = a.quality > 0 && a.quality <= 720 ? 1 : 0
+        const bPreferred = b.quality > 0 && b.quality <= 720 ? 1 : 0
+        if (aPreferred !== bPreferred) return bPreferred - aPreferred
+        if (a.quality !== b.quality) return b.quality - a.quality
+        return 0
     })
-    ffmpeg.on('error', reject)
-  })
-
-  await Promise.all([input, exit])
-  if (total > CFG.maxMB * 1048576) throw new Error(`file exceeds ${CFG.maxMB} MB`)
-  if (!chunks.length) throw new Error('ffmpeg produced no audio')
-
-  return { buffer: Buffer.concat(chunks), mimetype: 'audio/mpeg' }
 }
 
-async function collectStream(nodeStream) {
-  const chunks = []
-  let total = 0
+function collectMediaUrls(payload) {
+    const found = []
+    const visit = (node, keyPath = [], depth = 0) => {
+        if (node == null || depth > 9) return
+        if (typeof node === 'string') {
+            const value = node.trim()
+            if (isHttpUrl(value) && !isYouTubeSourceUrl(value) && !isImageOrAudioUrl(value, keyPath.join('.'))) {
+                found.push({ url: value, label: keyPath.join('.') })
+            }
+            return
+        }
+        if (Array.isArray(node)) {
+            node.forEach((entry, index) => visit(entry, [...keyPath, String(index)], depth + 1))
+            return
+        }
+        if (typeof node !== 'object') return
+        for (const [key, value] of Object.entries(node)) {
+            visit(value, [...keyPath, key], depth + 1)
+        }
+    }
+    visit(payload)
+    return rankMediaCandidates(found)
+}
 
-  return new Promise((resolve, reject) => {
-    nodeStream.on('data', chunk => {
-      total += chunk.length
-      if (total > CFG.maxMB * 1048576) {
-        nodeStream.destroy()
-        return reject(new Error(`file exceeds ${CFG.maxMB} MB`))
-      }
-      chunks.push(chunk)
+function extractYouTubeId(url) {
+    if (!isHttpUrl(url)) return null
+    try {
+        const parsed = new URL(url)
+        if (parsed.hostname === 'youtu.be') return parsed.pathname.slice(1).match(/^[A-Za-z0-9_-]{6,}/)?.[0] || null
+        const queryId = parsed.searchParams.get('v')
+        if (queryId) return queryId.match(/^[A-Za-z0-9_-]{6,}/)?.[0] || null
+        const pathMatch = parsed.pathname.match(/\/(?:shorts|embed|live)\/([A-Za-z0-9_-]{6,})/i)
+        return pathMatch ? pathMatch[1] : null
+    } catch (_) {
+        return null
+    }
+}
+
+async function getJson(url, options = {}) {
+    const response = await axios.get(url, {
+        timeout: JSON_TIMEOUT_MS,
+        maxContentLength: 2 * 1024 * 1024,
+        maxBodyLength: 2 * 1024 * 1024,
+        headers: { 'User-Agent': USER_AGENT, Accept: 'application/json, text/plain, */*', ...options.headers },
+        validateStatus: () => true,
+        ...options,
     })
-    nodeStream.on('end', () => resolve({ buffer: Buffer.concat(chunks), mimetype: 'video/mp4' }))
-    nodeStream.on('error', reject)
-  })
+    if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`)
+    if (typeof response.data === 'string' && /^\s*</.test(response.data)) throw new Error('provider returned HTML instead of JSON')
+    return response.data
 }
 
-/* ---------- command handler ---------- */
-
-async function handle(kind, { sock, message, quotedMessage, text, prefix, command }) {
-  const jid = message.key.remoteJid
-  const reply = body => sock.sendMessage(jid, { text: body }, { quoted: message })
-
-  let query = String(text || '').trim()
-  if (!query && quotedMessage) {
-    query = (quotedMessage.conversation || quotedMessage.extendedTextMessage?.text || '').trim()
-  }
-
-  let quality = CFG.videoQuality
-  const words = query.split(/\s+/)
-  const lastWord = words[words.length - 1]?.replace(/p$/i, '')
-  if (kind === 'video' && words.length > 1 && QUALITIES.includes(lastWord)) {
-    quality = lastWord
-    query = words.slice(0, -1).join(' ')
-  }
-
-  if (!query) return reply(`Example: ${prefix}${command} shape of you`)
-
-  const id = extractVideoId(query)
-
-  let info
-  try {
-    info = id ? await lookupLink(id) : await searchYouTube(query)
-  } catch (err) {
-    console.error('Search failed:', err)
-    return reply(`❌ YouTube search failed.\n\n*Reason:*\n${err.message}`)
-  }
-  if (!info) return reply('❌ Nothing found.')
-
-  const maxMin = kind === 'audio' ? CFG.maxAudioMin : CFG.maxVideoMin
-  if (!info.seconds) {
-    return reply("❌ Can't verify this video's length (likely a livestream/premiere) — blocked.")
-  }
-  if (info.seconds > maxMin * 60) return reply(`❌ Limit is ${maxMin} minutes.`)
-
-  const caption = `${kind === 'audio' ? '🎵' : '🎬'} *${info.title}*\n\n⏳ Downloading...`
-  const card = sock
-    .sendMessage(
-      jid,
-      { image: { url: `https://i.ytimg.com/vi/${info.id}/hqdefault.jpg` }, caption },
-      { quoted: message }
-    )
-    .catch(() => reply(caption).catch(() => {}))
-
-  const url = `https://www.youtube.com/watch?v=${info.id}`
-
-  let media
-  try {
-    media = await withTimeout(
-      kind === 'audio' ? downloadAudio(url) : downloadVideo(url, quality),
-      CFG.downloadTimeoutMs
-    )
-  } catch (err) {
-    await card
-    return reply(`❌ Download failed.\n\n*Reason:*\n${err.message}`)
-  }
-
-  await card
-  const name = safeName(info.title)
-
-  if (kind === 'audio') {
-    await sock.sendMessage(
-      jid,
-      { audio: media.buffer, mimetype: 'audio/mpeg', fileName: `${name}.mp3` },
-      { quoted: message }
-    )
-  } else {
-    await sock.sendMessage(
-      jid,
-      {
-        video: media.buffer,
-        mimetype: 'video/mp4',
-        fileName: `${name}.mp4`,
-        caption: `🎬 ${info.title}`
-      },
-      { quoted: message }
-    )
-  }
+async function fromOfficialHector(url) {
+    const data = await getJson('https://yt-dl.officialhectormanuel.workers.dev/', { params: { url } })
+    return collectMediaUrls(data)
 }
 
-export const playCommand = { command: ['play', 'song', 'ytmp3', 'yta'], run: ctx => handle('audio', ctx) }
-export const videoCommand = { command: ['video', 'ytmp4', 'ytv'], run: ctx => handle('video', ctx) }
-export default playCommand
+async function fromDavidCyril(url) {
+    const data = await getJson('https://apis.davidcyril.name.ng/download/ytmp4', { params: { url } })
+    return collectMediaUrls(data)
+}
+
+async function fromEliteProTech(url) {
+    const data = await getJson('https://eliteprotech-apis.zone.id/ytmp4', { params: { url } })
+    return collectMediaUrls(data)
+}
+
+async function fromAgatz(url) {
+    const data = await getJson('https://api.agatz.xyz/api/ytmp4', { params: { url } })
+    return collectMediaUrls(data)
+}
+
+async function fromPrexzy(url) {
+    const data = await getJson('https://prexzyapis.com/download/youtube-video', { params: { url } })
+    return collectMediaUrls(data)
+}
+
+async function fromPiped(url) {
+    const videoId = extractYouTubeId(url)
+    if (!videoId) return []
+
+    for (const api of PIPED_APIS) {
+        try {
+            const data = await getJson(`${api}/streams/${videoId}`, { timeout: 10_000 })
+            const streams = Array.isArray(data?.videoStreams) ? data.videoStreams : []
+            const candidates = streams
+                .filter(stream => isHttpUrl(stream?.url))
+                .filter(stream => /video\/mp4/i.test(String(stream.mimeType || '')))
+                .filter(stream => stream.videoOnly !== true)
+                .map(stream => ({
+                    url: stream.url,
+                    label: `${stream.quality || ''} ${stream.height || ''}p`,
+                }))
+            const ranked = rankMediaCandidates(candidates)
+            if (ranked.length) return ranked
+        } catch (error) {
+            console.error(`[video] Piped provider ${api} failed:`, error.message)
+        }
+    }
+    return []
+}
+
+function looksLikeVideo(buffer, contentType) {
+    const type = String(contentType || '').toLowerCase()
+    if (type.includes('text/html') || type.includes('application/json') || type.includes('audio/')) return false
+    if (type.includes('video/')) return true
+    if (!Buffer.isBuffer(buffer) || buffer.length < 12) return false
+    const mp4 = buffer.subarray(4, 8).toString('ascii') === 'ftyp'
+    const webm = buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))
+    return mp4 || webm
+}
+
+async function downloadBinary(url) {
+    let lastError = null
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+            const response = await axios.get(url, {
+                responseType: 'arraybuffer',
+                timeout: DOWNLOAD_TIMEOUT_MS,
+                maxContentLength: MAX_VIDEO_BYTES,
+                maxBodyLength: MAX_VIDEO_BYTES,
+                maxRedirects: 6,
+                headers: {
+                    'User-Agent': USER_AGENT,
+                    Accept: 'video/mp4,video/*;q=0.9,application/octet-stream;q=0.8,*/*;q=0.5',
+                },
+                validateStatus: () => true,
+            })
+            const buffer = Buffer.from(response.data || '')
+            if (response.status >= 200 && response.status < 300
+                && buffer.length >= MIN_VIDEO_BYTES
+                && buffer.length <= MAX_VIDEO_BYTES
+                && looksLikeVideo(buffer, response.headers?.['content-type'])) {
+                return buffer
+            }
+            const type = response.headers?.['content-type'] || 'unknown'
+            throw new Error(`HTTP ${response.status}, ${type}, ${buffer.length} bytes`)
+        } catch (error) {
+            lastError = error
+            if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 700))
+        }
+    }
+    throw lastError || new Error('download failed')
+}
+
+async function validateAndRemux(buffer) {
+    const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sukuna-video-'))
+    const rawPath = path.join(directory, 'input.bin')
+    const fixedPath = path.join(directory, 'output.mp4')
+    await fs.promises.writeFile(rawPath, buffer)
+
+    try {
+        const probe = await execFileAsync(FFPROBE_PATH, [
+            '-v', 'error', '-show_entries', 'stream=codec_type,codec_name',
+            '-of', 'json', rawPath,
+        ], { timeout: 30_000 })
+        
+        const streams = JSON.parse(probe.stdout || '{}').streams || []
+        const videoStream = streams.find(stream => stream.codec_type === 'video')
+        const audioStream = streams.find(stream => stream.codec_type === 'audio')
+        
+        if (!videoStream) throw new Error('file contains no video stream')
+
+        const videoReady = /^(?:h264|avc1)$/i.test(String(videoStream.codec_name || ''))
+        const audioReady = !audioStream || /^(?:aac|mp3)$/i.test(String(audioStream.codec_name || ''))
+        const needsTranscode = !videoReady || !audioReady
+        
+        const ffmpegArgs = [
+            '-hide_banner', '-loglevel', 'error', '-y', '-i', rawPath,
+            '-map', '0:v:0', '-map', '0:a:0?',
+        ]
+        
+        if (needsTranscode) {
+            ffmpegArgs.push(
+                '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '28',
+                '-pix_fmt', 'yuv420p',
+                ...(audioStream ? ['-c:a', 'aac', '-b:a', '128k'] : ['-an']),
+            )
+        } else {
+            ffmpegArgs.push('-c', 'copy')
+        }
+        ffmpegArgs.push('-movflags', '+faststart', fixedPath)
+
+        try {
+            await execFileAsync(FFMPEG_PATH, ffmpegArgs, { timeout: 180_000 })
+            const fixed = await fs.promises.readFile(fixedPath)
+            if (fixed.length >= MIN_VIDEO_BYTES && looksLikeVideo(fixed, 'video/mp4')) return fixed
+            throw new Error('ffmpeg produced an empty or invalid MP4')
+        } catch (error) {
+            if (needsTranscode) {
+                throw new Error(`unsupported codec ${videoStream.codec_name || 'unknown'} & conversion failed: ${error.message}`)
+            }
+            console.error('[video] faststart remux skipped:', error.message)
+            return buffer
+        }
+    } finally {
+        await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => {})
+    }
+}
+
+async function downloadFirstPlayable(candidates) {
+    let lastError = null
+    for (const candidate of candidates) {
+        try {
+            const raw = await downloadBinary(candidate.url)
+            const video = await validateAndRemux(raw)
+            return { video, source: candidate.url }
+        } catch (error) {
+            lastError = error
+            console.error(`[video] candidate failed (${candidate.label || candidate.url}):`, error.message)
+        }
+    }
+    throw lastError || new Error('No playable video candidate')
+}
+
+async function resolveAndDownloadVideo(url) {
+    const providers = [
+        ['official-hector', fromOfficialHector],
+        ['david-cyril', fromDavidCyril],
+        ['piped', fromPiped],
+        ['eliteprotech', fromEliteProTech],
+        ['agatz', fromAgatz],
+        ['prexzy', fromPrexzy],
+    ]
+    let lastError = null
+
+    for (const [name, provider] of providers) {
+        let candidates
+        try {
+            candidates = await provider(url)
+        } catch (error) {
+            console.error(`[video] ${name} resolver failed:`, error.message)
+            continue
+        }
+        if (!candidates.length) {
+            console.error(`[video] ${name} returned no usable MP4 URL`)
+            continue
+        }
+
+        try {
+            return await downloadFirstPlayable(candidates)
+        } catch (error) {
+            lastError = error
+            console.error(`[video] ${name} candidates were not playable:`, error.message)
+        }
+    }
+
+    throw lastError || new Error('No downloader returned a usable MP4')
+}
+
+
+/* =========================================
+ * BOT PLUGIN EXPORT
+ * ========================================= */
+export default {
+    command: ['video', 'play', 'song'],
+    category: 'downloader',
+
+    async run({ sock, message, isGroup, isOwner }) {
+        const jid = message?.key?.remoteJid
+        if (!jid) return
+
+        const reply = (text) => sock.sendMessage(jid, { text }, { quoted: message })
+
+        // Safely extract the text from the message
+        const fullText = message.message?.conversation || 
+                         message.message?.extendedTextMessage?.text || 
+                         message.message?.imageMessage?.caption || 
+                         message.message?.videoMessage?.caption || ''
+        
+        // Extract command and query
+        const prefix = process.env.PREFIX || '.'
+        const commandUsed = fullText.split(' ')[0].replace(prefix, '')
+        const query = fullText.replace(prefix + commandUsed, '').trim()
+
+        if (!query) {
+            return reply(`Provide video name\nExample: ${prefix}${commandUsed} Alan Walker Lily`)
+        }
+
+        try {
+            await sock.sendMessage(jid, { react: { text: '🔎', key: message.key } }).catch(() => {})
+
+            const result = await yts(query)
+            const videos = Array.isArray(result?.videos) ? result.videos : []
+            const vid = videos[0]
+            
+            if (!vid?.url) {
+                await sock.sendMessage(jid, { react: { text: '😕', key: message.key } }).catch(() => {})
+                return reply('No video found')
+            }
+
+            const title = String(vid.title || 'YouTube Video')
+            const author = String(vid.author?.name || 'Unknown')
+            const duration = String(vid.timestamp || 'Unknown')
+            const views = Number(vid.views || 0).toLocaleString()
+
+            await sock.sendMessage(jid, { react: { text: '⬇️', key: message.key } }).catch(() => {})
+            await sock.sendMessage(jid, {
+                image: { url: vid.thumbnail },
+                caption:
+                    `🎬 *${title}*\n\n` +
+                    `⏱️ Duration: ${duration}\n` +
+                    `👁️ Views: ${views}\n` +
+                    `📢 Channel: ${author}\n\n` +
+                    `⏳ Downloading...`,
+            }, { quoted: message }).catch(() => {})
+
+            const { video } = await resolveAndDownloadVideo(vid.url)
+            
+            await sock.sendMessage(jid, {
+                video,
+                mimetype: 'video/mp4',
+                caption: `🎬 *${title}*\n⏱️ ${duration}`,
+            }, { quoted: message })
+
+            await sock.sendMessage(jid, { react: { text: '✅', key: message.key } }).catch(() => {})
+        } catch (error) {
+            console.error('[video command]', error.message)
+            await sock.sendMessage(jid, { react: { text: '❌', key: message.key } }).catch(() => {})
+            await reply(`❌ Failed to download video.\n\n*Reason:* ${error.message}`)
+        }
+    }
+}
