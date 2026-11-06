@@ -1,243 +1,180 @@
-import fs from 'node:fs'
-import path from 'node:path'
+const HEROKU_API = 'https://api.heroku.com'
+
+function getConfig() {
+  const apiKey = (process.env.HEROKU_API_KEY || '').trim()
+  const appName = (process.env.HEROKU_APP_NAME || '').trim()
+  if (!apiKey) throw new Error('HEROKU_API_KEY is not set on this dyno')
+  if (!appName) throw new Error('HEROKU_APP_NAME is not set on this dyno')
+  return { apiKey, appName }
+}
+
+async function heroku(method, route, body) {
+  const { apiKey } = getConfig()
+  const res = await fetch(HEROKU_API + route, {
+    method,
+    headers: {
+      Accept: 'application/vnd.heroku+json; version=3',
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json'
+    },
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(20000)
+  })
+  const text = await res.text()
+  let data
+  try { data = text ? JSON.parse(text) : {} } catch { data = {} }
+  if (!res.ok) {
+    throw new Error(data.message || data.id || `Heroku ${res.status}`)
+  }
+  return data
+}
+
+async function patchVars(vars) {
+  const { appName } = getConfig()
+  return heroku('PATCH', `/apps/${encodeURIComponent(appName)}/config-vars`, vars)
+}
+
+function maskValue(key, value) {
+  const v = String(value)
+  const sensitive = /(SECRET|TOKEN|PASSWORD|PASS|CREDENTIAL|PRIVATE|SESSION_ID|API_KEY|AUTH)/i.test(key)
+  if (!sensitive) return v
+  if (v.length <= 8) return '*'.repeat(v.length)
+  return `${v.slice(0, 3)}…${v.slice(-3)} (${v.length} chars)`
+}
+
+/*
+ * Tokenize text into words, keeping quoted segments together.
+ *   KEY="hello world" OTHER=token
+ * → ["KEY=\"hello world\"", "OTHER=token"]
+ */
+function tokenize(text) {
+  const tokens = []
+  let cur = ''
+  let quote = null
+  for (const ch of text) {
+    if (quote) {
+      cur += ch
+      if (ch === quote) quote = null
+    } else if (ch === '"' || ch === "'") {
+      cur += ch
+      quote = ch
+    } else if (/\s/.test(ch)) {
+      if (cur) { tokens.push(cur); cur = '' }
+    } else {
+      cur += ch
+    }
+  }
+  if (cur) tokens.push(cur)
+  return tokens
+}
+
+function parseSetOperations(text) {
+  const tokens = tokenize(text)
+  const vars = {}
+  const errors = []
+  for (const token of tokens) {
+    const eq = token.indexOf('=')
+    if (eq <= 0) { errors.push(`missing '=' in: ${token}`); continue }
+    const key = token.slice(0, eq).trim()
+    let value = token.slice(eq + 1)
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      errors.push(`invalid key: ${key}`)
+      continue
+    }
+    if ((value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1)
+    }
+    vars[key] = value
+  }
+  return { vars, errors }
+}
+
+async function reply(sock, jid, message, text) {
+  return sock.sendMessage(jid, { text }, { quoted: message }).catch(() => {})
+}
 
 export default {
   command: ['setvar', 'delvar'],
   category: 'owner',
-  description: 'Manage environment variables',
+  description: 'Set or delete Heroku config vars',
 
-  async run({
-    sock,
-    message,
-    args,
-    command,
-    isOwner
-  }) {
-    if (!isOwner) return
-
-    const jid =
-      message?.key?.remoteJid
-
+  async run({ sock, message, args, text, command, isOwner }) {
+    const jid = message?.key?.remoteJid
     if (!jid) return
 
-    const envPath =
-      path.join(
-        process.cwd(),
-        '.env'
-      )
+    if (!isOwner) {
+      return reply(sock, jid, message, '❌ ᴏɴʟʏ ᴛʜᴇ ʙᴏᴛ ᴏᴡɴᴇʀ ᴄᴀɴ ᴍᴀɴᴀɢᴇ ʜᴇʀᴏᴋᴜ ᴠᴀʀꜱ')
+    }
 
     try {
-      let env =
-        fs.existsSync(envPath)
-          ? fs.readFileSync(envPath, 'utf8')
-          : ''
+      getConfig()
+    } catch (e) {
+      return reply(sock, jid, message,
+        `❌ ʜᴇʀᴏᴋᴜ ᴀᴄᴄᴇꜱꜱ ɴᴏᴛ ᴄᴏɴꜰɪɢᴜʀᴇᴅ\n\n${e.message}\n\n` +
+        `ꜱᴇᴛ ᴏɴᴄᴇ ᴠɪᴀ ᴄʟɪ:\n` +
+        `heroku config:set HEROKU_API_KEY=<key> HEROKU_APP_NAME=<app> -a <app>`)
+    }
 
-      /*
-       * DELETE VAR
-       */
-
-      if (command === 'delvar') {
-        const name =
-          args?.[0]
-            ?.trim()
-            .toUpperCase()
-
-        if (!name) {
-          return await sock.sendMessage(
-            jid,
-            {
-              text:
-                '❌ ᴜsᴀɢᴇ\n\n' +
-                '.ᴅᴇʟᴠᴀʀ <ɴᴀᴍᴇ>\n\n' +
-                'ᴇxᴀᴍᴘʟᴇ:\n' +
-                '.ᴅᴇʟᴠᴀʀ ʜᴇʀᴏᴋᴜ_ᴀᴘɪ_ᴋᴇʏ'
-            },
-            {
-              quoted: message
-            }
-          )
-        }
-
-        if (
-          !/^[A-Z_$][A-Z0-9_$]*$/i.test(name)
-        ) {
-          return await sock.sendMessage(
-            jid,
-            {
-              text:
-                '❌ ɪɴᴠᴀʟɪᴅ ᴠᴀʀɪᴀʙʟᴇ ɴᴀᴍᴇ'
-            },
-            {
-              quoted: message
-            }
-          )
-        }
-
-        const regex =
-          new RegExp(
-            `^\\s*${name}\\s*=.*(?:\\r?\\n|$)`,
-            'gim'
-          )
-
-        if (!regex.test(env)) {
-          return await sock.sendMessage(
-            jid,
-            {
-              text:
-                `❌ ${name} ɴᴏᴛ ғᴏᴜɴᴅ`
-            },
-            {
-              quoted: message
-            }
-          )
-        }
-
-        env =
-          env.replace(regex, '')
-
-        fs.writeFileSync(
-          envPath,
-          env,
-          'utf8'
-        )
-
-        delete process.env[name]
-
-        return await sock.sendMessage(
-          jid,
-          {
-            text:
-              '✅ ᴠᴀʀɪᴀʙʟᴇ ᴅᴇʟᴇᴛᴇᴅ\n\n' +
-              `🗑️ ɴᴀᴍᴇ: ${name}`
-          },
-          {
-            quoted: message
-          }
-        )
+    /* ── SETVAR ── */
+    if (command === 'setvar') {
+      const { vars, errors } = parseSetOperations(text)
+      if (errors.length) {
+        return reply(sock, jid, message,
+          '❌ ɪɴᴠᴀʟɪᴅ ɪɴᴘᴜᴛ\n\n' + errors.map(e => '• ' + e).join('\n'))
+      }
+      const keys = Object.keys(vars)
+      if (!keys.length) {
+        return reply(sock, jid, message,
+          '⚠️ ᴜꜱᴀɢᴇ: .ꜱᴇᴛᴠᴀʀ KEY=value [KEY2=value2 …]')
       }
 
-      /*
-       * SET VAR
-       */
+      const preview = keys.map(k => `│ ${k} = ${maskValue(k, vars[k])}`).join('\n')
 
-      const name =
-        args?.[0]
-          ?.trim()
-          .toUpperCase()
+      await reply(sock, jid, message,
+        `⚙️ ꜱᴇᴛᴛɪɴɢ ${keys.length} ᴠᴀʀ(ꜱ)…\n\n${preview}\n\nᴛʜᴇ ʙᴏᴛ ᴡɪʟʟ ʀᴇꜱᴛᴀʀᴛ ɪɴ 5-30ꜱ`)
 
-      const value =
-        args
-          ?.slice(1)
-          .join(' ')
-          .trim()
+      try {
+        await patchVars(vars)
+        console.log(`[HEROKUVAR] Set: ${keys.join(', ')}`)
+        return reply(sock, jid, message,
+          `✅ ꜱᴇᴛ ꜱᴜᴄᴄᴇꜱꜱꜰᴜʟ\n\n` +
+          keys.map(k => `• ${k} = ${maskValue(k, vars[k])}`).join('\n') +
+          `\n\n⏳ ʀᴇꜱᴛᴀʀᴛɪɴɢ ɴᴏᴡ — ʙᴏᴛ ᴡɪʟʟ ʙᴇ ʙᴀᴄᴋ ꜱʜᴏʀᴛʟʏ`)
+      } catch (e) {
+        console.error('[HEROKUVAR] Set failed:', e.message)
+        return reply(sock, jid, message, `❌ ꜱᴇᴛ ꜰᴀɪʟᴇᴅ\n\n${e.message}`)
+      }
+    }
 
-      if (!name || !value) {
-        return await sock.sendMessage(
-          jid,
-          {
-            text:
-              '❌ ᴜsᴀɢᴇ\n\n' +
-              '.sᴇᴛᴠᴀʀ <ɴᴀᴍᴇ> <ᴠᴀʟᴜᴇ>\n\n' +
-              'ᴇxᴀᴍᴘʟᴇ:\n' +
-              '.sᴇᴛᴠᴀʀ ᴘʀᴇғɪx !\n' +
-              '.sᴇᴛᴠᴀʀ ᴍᴏᴅᴇ ᴘᴜʙʟɪᴄ'
-          },
-          {
-            quoted: message
-          }
-        )
+    /* ── DELVAR ── */
+    if (command === 'delvar') {
+      const keys = args.map(k => String(k || '').trim()).filter(Boolean)
+      if (!keys.length) {
+        return reply(sock, jid, message,
+          '⚠️ ᴜꜱᴀɢᴇ: .ᴅᴇʟᴠᴀʀ KEY [KEY2 …]')
+      }
+      const invalid = keys.filter(k => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(k))
+      if (invalid.length) {
+        return reply(sock, jid, message,
+          `❌ ɪɴᴠᴀʟɪᴅ ᴋᴇʏ(ꜱ): ${invalid.join(', ')}`)
       }
 
-      if (
-        !/^[A-Z_$][A-Z0-9_$]*$/i.test(name)
-      ) {
-        return await sock.sendMessage(
-          jid,
-          {
-            text:
-              '❌ ɪɴᴠᴀʟɪᴅ ᴠᴀʀɪᴀʙʟᴇ ɴᴀᴍᴇ'
-          },
-          {
-            quoted: message
-          }
-        )
+      const payload = {}
+      for (const k of keys) payload[k] = null
+
+      await reply(sock, jid, message,
+        `⚙️ ᴅᴇʟᴇᴛɪɴɢ ${keys.length} ᴠᴀʀ(ꜱ)…\n\n${keys.map(k => `• ${k}`).join('\n')}\n\nᴛʜᴇ ʙᴏᴛ ᴡɪʟʟ ʀᴇꜱᴛᴀʀᴛ ɪɴ 5-30ꜱ`)
+
+      try {
+        await patchVars(payload)
+        console.log(`[HEROKUVAR] Deleted: ${keys.join(', ')}`)
+        return reply(sock, jid, message,
+          `✅ ᴅᴇʟᴇᴛᴇᴅ\n\n${keys.map(k => `• ${k}`).join('\n')}\n\n⏳ ʀᴇꜱᴛᴀʀᴛɪɴɢ ɴᴏᴡ`)
+      } catch (e) {
+        console.error('[HEROKUVAR] Delete failed:', e.message)
+        return reply(sock, jid, message, `❌ ᴅᴇʟᴇᴛᴇ ꜰᴀɪʟᴇᴅ\n\n${e.message}`)
       }
-
-      const escapedValue =
-        value
-          .replace(/\\/g, '\\\\')
-          .replace(/"/g, '\\"')
-          .replace(/\r?\n/g, '\\n')
-
-      const line =
-        `${name}="${escapedValue}"`
-
-      const regex =
-        new RegExp(
-          `^\\s*${name}\\s*=.*(?:\\r?\\n|$)`,
-          'gim'
-        )
-
-      if (regex.test(env)) {
-        env =
-          env.replace(
-            regex,
-            `${line}\n`
-          )
-      } else {
-        if (
-          env.length > 0 &&
-          !env.endsWith('\n')
-        ) {
-          env += '\n'
-        }
-
-        env += `${line}\n`
-      }
-
-      fs.writeFileSync(
-        envPath,
-        env,
-        'utf8'
-      )
-
-      process.env[name] = value
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            '✅ ᴠᴀʀɪᴀʙʟᴇ sᴇᴛ sᴜᴄᴄᴇssғᴜʟʟʏ\n\n' +
-            `🔧 ɴᴀᴍᴇ: ${name}\n` +
-            `📝 ᴠᴀʟᴜᴇ: ${
-              name === 'HEROKU_API_KEY'
-                ? '••••••••••••'
-                : value
-            }\n\n` +
-            '♻️ ᴘʀᴏᴄᴇss.ᴇɴᴠ ᴜᴘᴅᴀᴛᴇᴅ'
-        },
-        {
-          quoted: message
-        }
-      )
-
-    } catch (error) {
-      console.error(
-        '[SETVAR] Error:',
-        error?.message || error
-      )
-
-      return await sock.sendMessage(
-        jid,
-        {
-          text:
-            '❌ ᴠᴀʀ ᴏᴘᴇʀᴀᴛɪᴏɴ ғᴀɪʟᴇᴅ\n\n' +
-            `${error?.message || error}`
-        },
-        {
-          quoted: message
-        }
-      )
     }
   }
 }
