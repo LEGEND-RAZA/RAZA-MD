@@ -312,7 +312,7 @@ async function downloadAndSend(sock, msg, from, selection, type) {
 }
 
 export default {
-    command: ['nplay', 'nsong', 'nmusic', 'naudio'],
+    command: ['play', 'song', 'music', 'audio'],
     category: 'media',
     description: 'Search YouTube and download the audio',
 
