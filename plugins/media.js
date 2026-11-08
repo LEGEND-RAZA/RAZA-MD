@@ -106,6 +106,10 @@ export default {
           return sock.sendMessage(jid, { text: '⚠️ ʀᴇᴘʟʏ ᴛᴏ ᴀɴ ɪᴍᴀɢᴇ ᴏʀ ᴠɪᴅᴇᴏ' }, { quoted: msg })
         }
 
+        // Check if user provided a custom pack name
+        const customPackName = String(ctx.text || '').trim()
+        const finalPackName = customPackName ? customPackName : '𝐑ᴀᴢᴀ-𝐌ᴅ'
+
         const buffer = await downloadMediaMessage(quoted, 'buffer', {})
         let webpBuffer
 
@@ -138,7 +142,7 @@ export default {
 
         await sock.sendMessage(jid, {
           sticker: webpBuffer,
-          packname: 'ʀᴀᴢᴀ ᴍᴅ',
+          packname: finalPackName,
           author: 'ʟᴇɢᴇɴᴅ ʀᴀᴢᴀ'
         }, { quoted: msg })
         return
