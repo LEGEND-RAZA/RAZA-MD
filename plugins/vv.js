@@ -1,4 +1,4 @@
-import { downloadMediaMessage } from '@whiskeysockets/baileys'
+import { downloadContentFromMessage } from '@whiskeysockets/baileys'
 
 function toSmallCaps(text) {
   const map = {
@@ -9,11 +9,7 @@ function toSmallCaps(text) {
     u: '\u1D1C', v: '\u1D20', w: '\u1D21', x: 'x',      y: '\u028F',
     z: '\u1D22'
   }
-  return String(text || '')
-    .toLowerCase()
-    .split('')
-    .map((c) => map[c] || c)
-    .join('')
+  return String(text || '').toLowerCase().split('').map((c) => map[c] || c).join('')
 }
 
 export default {
@@ -23,13 +19,8 @@ export default {
 
   async run({ sock, message }) {
     const jid = message.key.remoteJid
-
-    // 1. Unwrap the incoming command message if it was sent in disappearing mode
-    let msg = message.message
-    if (msg?.ephemeralMessage) msg = msg.ephemeralMessage.message
-
-    const msgType = Object.keys(msg || {})[0]
-    const ctxInfo = msg?.[msgType]?.contextInfo
+    const msgType = Object.keys(message.message || {})[0]
+    const ctxInfo = message.message?.[msgType]?.contextInfo
     const quotedMsg = ctxInfo?.quotedMessage
 
     if (!quotedMsg) {
@@ -40,12 +31,19 @@ export default {
       )
     }
 
-    // 2. Unwrap the quoted message to find the actual media
+    // Keep unwrapping the message until we reach the actual media object
     let inner = quotedMsg
-    if (inner?.viewOnceMessageV2) inner = inner.viewOnceMessageV2.message
-    else if (inner?.viewOnceMessage) inner = inner.viewOnceMessage.message
-    else if (inner?.viewOnceMessageV2Extension) inner = inner.viewOnceMessageV2Extension.message
-    else if (inner?.ephemeralMessage) inner = inner.ephemeralMessage.message
+    while (
+      inner?.viewOnceMessage || 
+      inner?.viewOnceMessageV2 || 
+      inner?.viewOnceMessageV2Extension || 
+      inner?.ephemeralMessage
+    ) {
+      if (inner.viewOnceMessage) inner = inner.viewOnceMessage.message
+      else if (inner.viewOnceMessageV2) inner = inner.viewOnceMessageV2.message
+      else if (inner.viewOnceMessageV2Extension) inner = inner.viewOnceMessageV2Extension.message
+      else if (inner.ephemeralMessage) inner = inner.ephemeralMessage.message
+    }
 
     const mediaType = Object.keys(inner || {})[0]
 
@@ -58,36 +56,30 @@ export default {
     }
 
     try {
-      // 3. Construct a proper fake message for Baileys to download (needs the Key & ID)
-      const fakeMsg = {
-        key: {
-          remoteJid: jid,
-          id: ctxInfo.stanzaId,
-          participant: ctxInfo.participant,
-          fromMe: false
-        },
-        message: quotedMsg 
+      // Extract the raw media node (e.g. imageMessage) and the type (e.g. 'image')
+      const mediaObj = inner[mediaType]
+      const targetMediaKey = mediaType.replace('Message', '') 
+
+      // Download directly from the media node, skipping all wrapper confusion
+      const stream = await downloadContentFromMessage(mediaObj, targetMediaKey)
+      
+      const chunks = []
+      for await (const chunk of stream) {
+        chunks.push(chunk)
+      }
+      const buffer = Buffer.concat(chunks)
+
+      if (buffer.length === 0) {
+        throw new Error('File is empty')
       }
 
-      // 4. Download with reuploadRequest to handle expired media URLs
-      const buffer = await downloadMediaMessage(
-        fakeMsg,
-        'buffer',
-        {},
-        {
-          logger: console,
-          reuploadRequest: sock.updateMediaMessage // Fixes "sometimes fails" on old media
-        }
-      )
+      const caption = mediaObj?.caption || `🔓 *${toSmallCaps('view once revealed')}*`
 
-      const targetMediaKey = mediaType.replace('Message', '')
-      const caption = inner[mediaType]?.caption || `🔓 *${toSmallCaps('view once revealed')}*`
-
+      // Send back to chat
       if (mediaType === 'audioMessage') {
-        const ptt = Boolean(inner.audioMessage?.ptt)
         return await sock.sendMessage(
           jid,
-          { audio: buffer, ptt, mimetype: 'audio/mp4' },
+          { audio: buffer, ptt: Boolean(mediaObj?.ptt), mimetype: mediaObj?.mimetype || 'audio/mp4' },
           { quoted: message }
         )
       }
@@ -97,11 +89,12 @@ export default {
         { [targetMediaKey]: buffer, caption },
         { quoted: message }
       )
+
     } catch (err) {
       console.error('[VIEWONCE] Extraction error:', err)
       await sock.sendMessage(
         jid,
-        { text: `❌ ${toSmallCaps('failed to retrieve view once media. link may have expired.')}` },
+        { text: `❌ ${toSmallCaps('failed to retrieve view once media.')}\n\n_${err.message || 'Media is corrupted or deleted'}_` },
         { quoted: message }
       )
     }
