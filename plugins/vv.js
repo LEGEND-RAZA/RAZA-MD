@@ -1,15 +1,56 @@
-import { downloadMediaMessage } from '@whiskeysockets/baileys'
+import { downloadMediaMessage, normalizeMessageContent } from '@whiskeysockets/baileys'
+import pino from 'pino'
+
+const logger = pino({ level: 'silent' })
+const MEDIA_TYPES = ['imageMessage', 'videoMessage', 'audioMessage']
 
 function toSmallCaps(text) {
   const map = {
     a: '\u1D00', b: '\u0299', c: '\u1D04', d: '\u1D05', e: '\u1D07',
     f: '\u0493', g: '\u0262', h: '\u029C', i: '\u026A', j: '\u1D0A',
     k: '\u1D0B', l: '\u029F', m: '\u1D0D', n: '\u0274', o: '\u1D0F',
-    p: '\u1D18', q: '\u01FA', r: '\u0280', s: 's',      t: '\u1D1B',
-    u: '\u1D1C', v: '\u1D20', w: '\u1D21', x: 'x',      y: '\u028F',
+    p: '\u1D18', q: '\u01EB', r: '\u0280', s: 's', t: '\u1D1B',
+    u: '\u1D1C', v: '\u1D20', w: '\u1D21', x: 'x', y: '\u028F',
     z: '\u1D22'
   }
   return String(text || '').toLowerCase().split('').map((c) => map[c] || c).join('')
+}
+
+// ---------- view-once cache (filled as messages arrive) ----------
+const cache = new Map()
+const hooked = new WeakSet()
+
+function isViewOnce(raw) {
+  const r = raw?.ephemeralMessage?.message || raw
+  return Boolean(r?.viewOnceMessage || r?.viewOnceMessageV2 || r?.viewOnceMessageV2Extension)
+}
+
+function hookCache(sock) {
+  if (hooked.has(sock)) return
+  hooked.add(sock)
+  sock.ev.on('messages.upsert', ({ messages }) => {
+    for (const m of messages || []) {
+      try {
+        if (!m.message || !m.key?.id || !isViewOnce(m.message)) continue
+        const inner = normalizeMessageContent(m.message)
+        if (!MEDIA_TYPES.includes(Object.keys(inner || {})[0])) continue
+        cache.set(m.key.id, { key: m.key, message: inner })
+        if (cache.size > 300) cache.delete(cache.keys().next().value)
+      } catch { /* ignore */ }
+    }
+  })
+}
+
+// ---------- download ----------
+async function tryDownload(sock, candidate) {
+  const buffer = await downloadMediaMessage(
+    candidate,
+    'buffer',
+    {},
+    { logger, reuploadRequest: (m) => sock.updateMediaMessage(m) }
+  )
+  if (!buffer || buffer.length === 0) throw new Error('Empty buffer')
+  return buffer
 }
 
 export default {
@@ -19,130 +60,81 @@ export default {
 
   async run({ sock, message }) {
     const jid = message.key.remoteJid
-    const msgType = Object.keys(message.message || {})[0]
-    const ctxInfo = message.message?.[msgType]?.contextInfo
+    const send = (text) => sock.sendMessage(jid, { text }, { quoted: message })
+
+    hookCache(sock)
+
+    // Find the contextInfo no matter which key comes first
+    const content = normalizeMessageContent(message.message)
+    const ctxInfo = Object.values(content || {}).map((v) => v?.contextInfo).find(Boolean)
     const quotedMsg = ctxInfo?.quotedMessage
 
     if (!quotedMsg) {
-      return await sock.sendMessage(
-        jid,
-        { text: `⚠️ ${toSmallCaps('please reply to a view once message.')}` },
-        { quoted: message }
-      )
+      return send(`⚠️ ${toSmallCaps('please reply to a view once message.')}`)
     }
 
-    // 1. Unwrap the nested wrappers to find the actual media type
-    let inner = quotedMsg
-    while (
-      inner?.viewOnceMessage || 
-      inner?.viewOnceMessageV2 || 
-      inner?.viewOnceMessageV2Extension || 
-      inner?.ephemeralMessage
-    ) {
-      if (inner.viewOnceMessage) inner = inner.viewOnceMessage.message
-      else if (inner.viewOnceMessageV2) inner = inner.viewOnceMessageV2.message
-      else if (inner.viewOnceMessageV2Extension) inner = inner.viewOnceMessageV2Extension.message
-      else if (inner.ephemeralMessage) inner = inner.ephemeralMessage.message
-    }
-
+    const inner = normalizeMessageContent(quotedMsg)
     const mediaType = Object.keys(inner || {})[0]
 
-    if (!['imageMessage', 'videoMessage', 'audioMessage'].includes(mediaType)) {
-      return await sock.sendMessage(
-        jid,
-        { text: `❌ ${toSmallCaps('the quoted message is not a valid view once media.')}` },
-        { quoted: message }
-      )
+    if (!MEDIA_TYPES.includes(mediaType)) {
+      return send(`❌ ${toSmallCaps('the quoted message is not a valid view once media.')}`)
     }
 
     try {
-      // 2. Construct a fake message with the correct Key info
-      const fakeMsg = {
+      const candidates = []
+
+      // Cached original has the full media keys, so try it first
+      const cached = cache.get(ctxInfo.stanzaId)
+      if (cached) candidates.push(cached)
+
+      // Then the quoted copy
+      candidates.push({
         key: {
           remoteJid: jid,
           id: ctxInfo.stanzaId,
           participant: ctxInfo.participant,
           fromMe: false
         },
-        message: quotedMsg
-      }
+        message: inner
+      })
 
-      // 3. Download with custom Retry Handler
-      const buffer = await downloadMediaMessage(
-        fakeMsg,
-        'buffer',
-        {},
-        {
-          logger: console,
-          reuploadRequest: async (msg) => {
-            // Ask WhatsApp for a fresh URL
-            await sock.updateMediaMessage(msg)
-            
-            // Wait for WhatsApp to send the updated message back
-            return new Promise((resolve, reject) => {
-              const listener = (updates) => {
-                for (const update of updates) {
-                  if (update.key.id === msg.key.id && update.update.message) {
-                    sock.ev.off('messages.update', listener)
-                    clearTimeout(timer)
-                    resolve(update.update.message)
-                    return
-                  }
-                }
-              }
-              
-              sock.ev.on('messages.update', listener)
-              
-              // Timeout after 10 seconds if WhatsApp doesn't respond
-              const timer = setTimeout(() => {
-                sock.ev.off('messages.update', listener)
-                reject(new Error('Media retry timed out'))
-              }, 10000)
-            })
-          }
+      let buffer = null
+      let lastErr = null
+      for (const candidate of candidates) {
+        try {
+          buffer = await tryDownload(sock, candidate)
+          break
+        } catch (err) {
+          lastErr = err
+          console.error('[VIEWONCE] attempt failed:', err.message)
         }
-      )
-
-      if (!buffer || buffer.length === 0) throw new Error('Empty buffer')
+      }
+      if (!buffer) throw lastErr || new Error('Download failed')
 
       const mediaNode = inner[mediaType]
-      const targetMediaKey = mediaType.replace('Message', '')
+      const key = mediaType.replace('Message', '')
       const caption = mediaNode?.caption || `🔓 *${toSmallCaps('view once revealed')}*`
 
-      // 4. Send the media back
       if (mediaType === 'audioMessage') {
         return await sock.sendMessage(
           jid,
-          { 
-            audio: buffer, 
-            ptt: Boolean(mediaNode?.ptt), 
-            mimetype: mediaNode?.mimetype || 'audio/mp4' 
-          },
+          { audio: buffer, ptt: Boolean(mediaNode?.ptt), mimetype: mediaNode?.mimetype || 'audio/mp4' },
           { quoted: message }
         )
       }
 
-      await sock.sendMessage(
-        jid,
-        { [targetMediaKey]: buffer, caption },
-        { quoted: message }
-      )
-
+      await sock.sendMessage(jid, { [key]: buffer, caption }, { quoted: message })
     } catch (err) {
       console.error('[VIEWONCE] Extraction error:', err)
-      
+
       let errMsg = toSmallCaps('failed to retrieve view once media.')
-      if (err.message.includes('No valid media URL') || err.message.includes('timed out')) {
-        errMsg = toSmallCaps('whatsapp has permanently deleted this media from their servers. it cannot be recovered.')
+      if (/No valid media URL|timed out|404|410|media key|mediaKey/i.test(err.message)) {
+        errMsg = toSmallCaps('this media is no longer available or the keys were stripped by whatsapp. it was not cached, so it cannot be recovered.')
       } else if (err.message.includes('Empty buffer')) {
         errMsg = toSmallCaps('downloaded file was empty.')
       }
 
-      await sock.sendMessage(
-        jid,
-        { text: `❌ ${errMsg}` },
-        { quoted: message }
-      )
+      await send(`❌ ${errMsg}`)
     }
   }
 }
