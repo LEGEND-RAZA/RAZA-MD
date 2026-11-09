@@ -28,6 +28,9 @@ import {
   startAlwaysOnline
 } from './handler.js'
 
+// 🚀 ADDED IMPORT FOR VIEW ONCE CACHING
+import { captureViewOnce } from './lib/viewonce.js'
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const SESSION_DIR = path.join(__dirname, 'session')
 const CREDS_FILE = path.join(SESSION_DIR, 'creds.json')
@@ -584,6 +587,9 @@ async function createSocket() {
     if (gen !== socketGen) return
 
     for (const message of event.messages || []) rememberSent(message)
+    
+    // 🚀 ADDED VIEW ONCE CAPTURE HERE
+    for (const message of event.messages || []) captureViewOnce(s, message)
 
     // ==========================================
     // STICKER / EMOJI COMMAND TRIGGER
