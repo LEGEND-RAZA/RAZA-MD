@@ -1,4 +1,4 @@
-import { downloadContentFromMessage } from '@whiskeysockets/baileys'
+import { downloadMediaMessage } from '@whiskeysockets/baileys'
 
 function toSmallCaps(text) {
   const map = {
@@ -31,7 +31,7 @@ export default {
       )
     }
 
-    // Keep unwrapping the message until we reach the actual media object
+    // Unwrap the message to find the actual media type for validation
     let inner = quotedMsg
     while (
       inner?.viewOnceMessage || 
@@ -50,36 +50,48 @@ export default {
     if (!['imageMessage', 'videoMessage', 'audioMessage'].includes(mediaType)) {
       return await sock.sendMessage(
         jid,
-        { text: `❌ ${toSmallCaps('the quoted message is not a valid view once media.')}` },
+        { text: `❌ ${toSmallCaps('the quoted message is not a valid media.')}` },
         { quoted: message }
       )
     }
 
     try {
-      // Extract the raw media node (e.g. imageMessage) and the type (e.g. 'image')
-      const mediaObj = inner[mediaType]
-      const targetMediaKey = mediaType.replace('Message', '') 
-
-      // Download directly from the media node, skipping all wrapper confusion
-      const stream = await downloadContentFromMessage(mediaObj, targetMediaKey)
-      
-      const chunks = []
-      for await (const chunk of stream) {
-        chunks.push(chunk)
-      }
-      const buffer = Buffer.concat(chunks)
-
-      if (buffer.length === 0) {
-        throw new Error('File is empty')
+      // Construct the fake message object. We pass the ORIGINAL quotedMsg 
+      // so Baileys can properly send the retry request if the URL is missing.
+      const fakeMsg = {
+        key: {
+          remoteJid: jid,
+          id: ctxInfo.stanzaId,
+          participant: ctxInfo.participant,
+          fromMe: false
+        },
+        message: quotedMsg 
       }
 
-      const caption = mediaObj?.caption || `🔓 *${toSmallCaps('view once revealed')}*`
+      // downloadMediaMessage automatically handles missing URLs by requesting 
+      // WhatsApp to re-upload the media using the reuploadRequest parameter.
+      const buffer = await downloadMediaMessage(
+        fakeMsg,
+        'buffer',
+        {},
+        {
+          logger: console,
+          reuploadRequest: sock.updateMediaMessage
+        }
+      )
 
-      // Send back to chat
+      const mediaNode = inner[mediaType]
+      const targetMediaKey = mediaType.replace('Message', '')
+      const caption = mediaNode?.caption || `🔓 *${toSmallCaps('view once revealed')}*`
+
       if (mediaType === 'audioMessage') {
         return await sock.sendMessage(
           jid,
-          { audio: buffer, ptt: Boolean(mediaObj?.ptt), mimetype: mediaObj?.mimetype || 'audio/mp4' },
+          { 
+            audio: buffer, 
+            ptt: Boolean(mediaNode?.ptt), 
+            mimetype: mediaNode?.mimetype || 'audio/mp4' 
+          },
           { quoted: message }
         )
       }
@@ -94,7 +106,7 @@ export default {
       console.error('[VIEWONCE] Extraction error:', err)
       await sock.sendMessage(
         jid,
-        { text: `❌ ${toSmallCaps('failed to retrieve view once media.')}\n\n_${err.message || 'Media is corrupted or deleted'}_` },
+        { text: `❌ ${toSmallCaps('failed to retrieve view once media. it may have been deleted from whatsapp servers.')}` },
         { quoted: message }
       )
     }
