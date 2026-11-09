@@ -14,6 +14,7 @@ const __dirname = path.dirname(__filename)
 
 const DB_DIR = path.join(__dirname, '../database')
 const WARN_FILE = path.join(DB_DIR, 'groupwarns.json')
+const CUSTOM_WARN_FILE = path.join(DB_DIR, 'custom_warns.json')
 const WARN_LIMIT = 5
 
 if (!fs.existsSync(DB_DIR)) {
@@ -31,6 +32,19 @@ function loadWarns() {
 
 function saveWarns(data) {
   fs.writeFileSync(WARN_FILE, JSON.stringify(data, null, 2))
+}
+
+function loadCustomWarns() {
+  try {
+    if (!fs.existsSync(CUSTOM_WARN_FILE)) return {}
+    return JSON.parse(fs.readFileSync(CUSTOM_WARN_FILE, 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+function saveCustomWarns(data) {
+  fs.writeFileSync(CUSTOM_WARN_FILE, JSON.stringify(data, null, 2))
 }
 
 function toSmallCaps(text) {
@@ -115,11 +129,6 @@ function normalizeGroupJid(value) {
   return null
 }
 
-/*
- * Build a link-preview extendedTextMessage with the group's own
- * DP thumbnail, name, and description — instead of a generic preview
- * regenerated under the bot's account.
- */
 async function buildInvitePreview(sock, groupJid, inviteLink) {
   let title = 'WhatsApp Group'
   let description = ''
@@ -165,37 +174,19 @@ async function buildInvitePreview(sock, groupJid, inviteLink) {
 
 export default {
   command: [
-    'join',
-    'left',
-    'promote',
-    'demote',
-    'kick',
-    'remove',
-    'mute',
-    'unmute',
-    'invite',
-    'grouplink',
-    'setgname',
-    'setgdesc',
-    'gpp',
-    'ginfo',
-    'approval',
-    'approveall',
-    'approve',
-    'admins',
-    'warn',
-    'warns',
-    'resetwarn'
+    'join', 'left', 'promote', 'demote', 'kick', 'remove', 'mute', 'unmute',
+    'invite', 'grouplink', 'setgname', 'setgdesc', 'gpp', 'ginfo',
+    'approval', 'approveall', 'approve', 'admins', 'warn', 'warns', 'resetwarn', 'setwarn'
   ],
 
   category: 'group',
-
   description: 'Complete group management',
 
-  async run({ sock, message, args, text, command, isGroup, isOwner }) {
+  async run({ sock, message, args, text, command, isGroup, isOwner, prefix }) {
 
     const jid = message?.key?.remoteJid
     if (!jid) return
+    const px = prefix || '.'
 
     /* ── JOIN ── */
     if (command === 'join') {
@@ -477,6 +468,74 @@ export default {
       )
     }
 
+    /* ── SETWARN (Custom warning message) ── */
+    if (command === 'setwarn') {
+      if (!isAdmin && !isOwner) {
+        return await sock.sendMessage(
+          jid,
+          { text: `❌ ${toSmallCaps('only group admins can change the warning message.')}` },
+          { quoted: message }
+        )
+      }
+
+      const customWarns = loadCustomWarns()
+      const newMessage = text ? text.trim() : ''
+
+      if (newMessage.toLowerCase() === 'reset' || newMessage.toLowerCase() === 'clear') {
+        delete customWarns[jid]
+        saveCustomWarns(customWarns)
+        return await sock.sendMessage(
+          jid,
+          { 
+            text: `╭━━━〔 ⚠️ ᴄᴜsᴛᴏᴍ ᴡᴀʀɴɪɴɢ 〕━━━┈⊷\n` +
+                  `┃\n` +
+                  `┃ ✅ sᴛᴀᴛᴜs: ʀᴇsᴇᴛ ᴛᴏ ᴅᴇғᴀᴜʟᴛ\n` +
+                  `┃\n` +
+                  `╰━━━━━━━━━━━━━━━━━━━┈⊷`
+          },
+          { quoted: message }
+        )
+      }
+
+      if (!newMessage) {
+        const current = customWarns[jid] ? `"${customWarns[jid]}"` : 'ᴅᴇғᴀᴜʟᴛ ᴡᴀʀɴɪɴɢ'
+        return await sock.sendMessage(
+          jid,
+          { 
+            text: `╭━━━〔 ⚠️ ᴄᴜsᴛᴏᴍ ᴡᴀʀɴɪɴɢ 〕━━━┈⊷\n` +
+                  `┃\n` +
+                  `┃ 📝 ᴄᴜʀʀᴇɴᴛ:\n` +
+                  `┃ ${current}\n` +
+                  `┃\n` +
+                  `┃ 💡 ᴜsᴀɢᴇ:\n` +
+                  `┃ ▸ ${px}setwarn <ᴍᴇssᴀɢᴇ>\n` +
+                  `┃ ▸ ${px}setwarn ʀᴇsᴇᴛ\n` +
+                  `┃\n` +
+                  `╰━━━━━━━━━━━━━━━━━━━┈⊷`
+          },
+          { quoted: message }
+        )
+      }
+
+      customWarns[jid] = newMessage
+      saveCustomWarns(customWarns)
+
+      return await sock.sendMessage(
+        jid,
+        { 
+          text: `╭━━━〔 ⚠️ ᴄᴜsᴛᴏᴍ ᴡᴀʀɴɪɴɢ 〕━━━┈⊷\n` +
+                `┃\n` +
+                `┃ ✅ sᴛᴀᴛᴜs: ᴜᴘᴅᴀᴛᴇᴅ\n` +
+                `┃\n` +
+                `┃ 📝 ɴᴇᴡ ᴡᴀʀɴɪɴɢ ᴍᴇssᴀɢᴇ:\n` +
+                `┃ "${newMessage}"\n` +
+                `┃\n` +
+                `╰━━━━━━━━━━━━━━━━━━━┈⊷`
+        },
+        { quoted: message }
+      )
+    }
+
     /* ── WARN / WARNS / RESETWARN ── */
     if (command === 'warn' || command === 'warns' || command === 'resetwarn') {
       if (!isAdmin && !isOwner) {
@@ -508,6 +567,9 @@ export default {
       const warns = loadWarns()
       if (!warns[jid]) warns[jid] = {}
       if (!warns[jid][target]) warns[jid][target] = 0
+
+      const customWarns = loadCustomWarns()
+      const customMsg = customWarns[jid] ? customWarns[jid] : toSmallCaps('warning added.')
 
       if (command === 'warns') {
         const count = warns[jid][target] || 0
@@ -573,13 +635,26 @@ export default {
       }
 
       saveWarns(warns)
+
+      // Extract the reason for the warning (e.g. .warn @user Violation for rule)
+      const fullText = text || ''
+      const reason = fullText.replace(/@\S+/g, '').trim() || toSmallCaps('no reason provided')
+
       return await sock.sendMessage(
         jid,
         {
           text:
-            `⚠️ @${target.split('@')[0]}\n\n` +
-            `${toSmallCaps('warning added.')}\n\n` +
-            `${toSmallCaps(`warnings: ${count}/${WARN_LIMIT}`)}`,
+            `╭━━━〔 ⚠️ ᴡᴀʀɴɪɴɢ 〕━━━┈⊷\n` +
+            `┃\n` +
+            `┃ 👤 ᴜsᴇʀ: @${target.split('@')[0]}\n` +
+            `┃ 📝 ʀᴇᴀsᴏɴ: *${reason}*\n` +
+            `┃\n` +
+            `┃ 📢 ᴍᴇssᴀɢᴇ:\n` +
+            `┃ ${customMsg}\n` +
+            `┃\n` +
+            `┃ 🚨 ᴡᴀʀɴɪɴɢs: ${count}/${WARN_LIMIT}\n` +
+            `┃\n` +
+            `╰━━━━━━━━━━━━━━━━━━━┈⊷`,
           mentions: [target]
         },
         { quoted: message }
@@ -599,7 +674,6 @@ export default {
     if (command === 'left') {
       try {
         await sock.groupLeave(jid)
-        // SILENT — no reply
         return
       } catch (e) {
         console.error('[LEAVE ERROR]:', e?.message || e)
@@ -616,7 +690,6 @@ export default {
       const setting = command === 'mute' ? 'announcement' : 'not_announcement'
       try {
         await sock.groupSettingUpdate(jid, setting)
-        // SILENT — no reply
         return
       } catch {
         return await sock.sendMessage(
@@ -646,7 +719,6 @@ export default {
 
       try {
         await sock.groupParticipantsUpdate(jid, [target], action)
-        // SILENT — no success reply
         return
       } catch {
         return await sock.sendMessage(
