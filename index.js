@@ -107,15 +107,10 @@ function validCredsAt(file) {
 
 /*
  * ==============================
- * SPEED CACHES
+ * SPEED CACHES & RETRY HANDLING
  * ==============================
  */
 
-/*
- * Messages the bot sent. Baileys asks for these through getMessage() when
- * WhatsApp requests a retry; without it the receiver can be stuck on
- * "Waiting for this message".
- */
 const sentCache = new Map()
 const SENT_CACHE_MAX = 300
 
@@ -132,16 +127,12 @@ function rememberSent(msg) {
   }
 }
 
+// This is called by Baileys when a recipient asks to decrypt a message again.
 async function getMessage(key) {
-  return sentCache.get(key?.id)
+  const msg = sentCache.get(key?.id)
+  return msg || null
 }
 
-/*
- * Group metadata. Without this, EVERY message sent to a group first asks
- * WhatsApp for the group's member list. One command = reaction + reaction
- * removal + reply = 3 extra round trips. Entries are dropped whenever the
- * group changes, so new members still get the message.
- */
 const groupCache = new Map()
 const GROUP_TTL_MS = 5 * 60 * 1000
 const GROUP_CACHE_MAX = 300
@@ -166,7 +157,7 @@ async function cachedGroupMetadata(jid) {
     return meta
   } catch {
     groupCache.delete(jid)
-    return undefined // Baileys falls back to its own lookup
+    return undefined
   }
 }
 
@@ -238,12 +229,6 @@ async function restoreRemoteSession(force = false) {
   return 'retry'
 }
 
-/*
- * FIX: the old version read every session file with readFileSync (and
- * base64-encoded them all in one go) on the main thread every 10 minutes.
- * With a big session folder that freezes the bot for a moment, can drop the
- * WhatsApp connection, and spikes memory. Everything here is async now.
- */
 async function listSessionFiles() {
   const names = (await fs.promises.readdir(SESSION_DIR)).sort()
   const list = []
@@ -277,10 +262,6 @@ async function doPushSession() {
     .digest('hex')
   if (sig === lastSig) return
 
-  /*
-   * FIX: never upload a half-written creds.json. If that ever reached the
-   * server, the next restart could not restore the session at all.
-   */
   const credsBuffer = await fs.promises.readFile(CREDS_FILE)
   if (!validCredsBuffer(credsBuffer)) {
     console.log('[SESSION] creds.json is being written, will sync next cycle.')
@@ -298,9 +279,7 @@ async function doPushSession() {
           const buffer = await fs.promises.readFile(path.join(SESSION_DIR, name))
           files[name] = buffer.toString('base64')
           bytes += buffer.length
-        } catch {
-          // file disappeared between listing and reading, skip it
-        }
+        } catch {}
       })
     )
   }
@@ -429,10 +408,6 @@ function nextRetryDelay() {
   return Math.min(5000 * 2 ** (reconnectAttempts - 1), 60000)
 }
 
-/*
- * One timer, one place. Replaces the old "reconnecting" flag, which could get
- * stuck on `true` and stop the bot from ever reconnecting.
- */
 function scheduleReconnect(delayMs, reason) {
   if (shuttingDown || halted || reconnectTimer) return
 
@@ -543,10 +518,6 @@ async function onConnectionUpdate(gen, s, update) {
       return
     }
 
-    /*
-     * FIX: used to give up for good after 3 tries. A normal restart/deploy
-     * briefly runs two copies of the bot, so give the old one time to go away.
-     */
     if (statusCode === DisconnectReason.connectionReplaced) {
       if (++replacedRetries > 8) {
         halted = true
@@ -573,17 +544,16 @@ async function createSocket() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR)
 
   const gen = ++socketGen
-  disposeSocket(sock) // old socket must not keep running next to the new one
+  disposeSocket(sock)
 
   const s = makeWASocket({
     auth: {
       creds: state.creds,
-      // cached key store = far fewer disk reads while encrypting/decrypting
       keys: makeCacheableSignalKeyStore(state.keys, logger)
     },
     logger,
     browser: Browsers.ubuntu('Chrome'),
-    markOnlineOnConnect: false, // presence is handled by startAlwaysOnline
+    markOnlineOnConnect: false,
     syncFullHistory: false,
     generateHighQualityLinkPreview: false,
     connectTimeoutMs: 60_000,
@@ -593,11 +563,15 @@ async function createSocket() {
 
   sock = s
 
-  /*
-   * FIX: register every event handler FIRST, synchronously. Before, the setup
-   * hooks were awaited before these lines, so a slow/hung hook meant the
-   * "close" event was never seen and the bot never reconnected.
-   */
+  // FIX: Monkey-patch sendMessage to cache outgoing messages immediately.
+  // This prevents "Waiting for this message" errors on retries.
+  const originalSendMessage = s.sendMessage
+  s.sendMessage = async (jid, content, options) => {
+    const msg = await originalSendMessage.call(s, jid, content, options)
+    if (msg && msg.key) rememberSent(msg)
+    return msg
+  }
+
   s.ev.on('creds.update', saveCreds)
 
   s.ev.on('connection.update', update => {
@@ -622,7 +596,6 @@ async function createSocket() {
         for (const message of event.messages || []) {
           let triggeredCmd = null
           
-          // Check Stickers
           if (message.message?.stickerMessage) {
             const hashBuf = message.message.stickerMessage.fileSha256
             const hash = hashBuf ? Buffer.from(hashBuf).toString('hex') : ''
@@ -631,7 +604,6 @@ async function createSocket() {
             }
           }
           
-          // Check Emojis
           if (!triggeredCmd) {
             const text = message.message?.conversation || message.message?.extendedTextMessage?.text || ''
             const cleanText = text.trim()
@@ -641,12 +613,10 @@ async function createSocket() {
             }
           }
 
-          // Convert to text command and inject
           if (triggeredCmd) {
             const prefix = process.env.PREFIX || '.'
             const fakeText = `${prefix}${triggeredCmd}`
             
-            // Overwrite message payload to simulate a text command
             message.message = { conversation: fakeText }
             console.log(`[STICKER CMD] Triggered ${fakeText}`)
           }
@@ -666,8 +636,6 @@ async function createSocket() {
 
   s.ev.on('group-participants.update', async event => {
     if (gen !== socketGen) return
-
-    // drop the cached member list first so welcome/goodbye messages see the change
     if (event?.id) groupCache.delete(event.id)
 
     try {
@@ -683,10 +651,8 @@ async function createSocket() {
     }
   })
 
-  // Plugin setup hooks (anti-delete registers messages.update here). Not awaited.
   runSetupHooks(s).catch(() => {})
 
-  // If the socket never reaches "open", rebuild it instead of hanging forever.
   clearTimeout(openWatchdog)
   openWatchdog = setTimeout(() => {
     if (gen !== socketGen) return
@@ -712,8 +678,6 @@ async function connect() {
     }
 
     if (restored !== 'ok') {
-      // FIX: used to give up after 5 tries. A pair server that is asleep or
-      // down for a few minutes must not kill the bot permanently.
       scheduleReconnect(Math.min(60000 * ++sessionRetries, 300000), 'Session download failed.')
       return
     }
@@ -727,12 +691,6 @@ async function connect() {
     connecting = false
   }
 }
-
-/*
- * ==============================
- * START / SHUTDOWN
- * ==============================
- */
 
 function startMemoryWatch() {
   setInterval(() => {
@@ -792,7 +750,7 @@ async function shutdown(signal, exitCode = 0) {
   try {
     await Promise.race([
       (async () => {
-        if (syncPromise) await syncPromise // let an upload in progress finish
+        if (syncPromise) await syncPromise
         await pushSession()
       })(),
       sleep(8000)
