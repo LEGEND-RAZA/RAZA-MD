@@ -15,8 +15,8 @@ const TG_API = `https://api.telegram.org/bot${TG_TOKEN}`
 const TG_FILE = `https://api.telegram.org/file/bot${TG_TOKEN}`
 
 const MAX_SEND = 60
-const PACK_NAME = 'RAZA MD'
-const PACK_PUBLISHER = 'LEGEND RAZA'
+const PACK_NAME = '𝐑ᴀᴢᴀ-𝐌ᴅ'
+const PACK_PUBLISHER = 'ʟᴇɢᴇɴᴅ ʀᴀᴢᴀ'
 
 function tmpFile(ext) {
     return path.join(os.tmpdir(), `tgs-${crypto.randomBytes(6).toString('hex')}${ext}`)
@@ -115,7 +115,9 @@ function ffmpegToAnimatedWebp(inputBuf, inputFps = 15) {
         '-hide_banner', '-loglevel', 'error', '-i', 'pipe:0',
         '-vf', `scale=512:512:force_original_aspect_ratio=decrease,fps=${inputFps}`,
         '-vcodec', 'libwebp_anim', '-lossless', '0', '-compression_level', '6', '-q:v', '75',
-        '-loop', '0', '-preset', 'default', '-an', '-vsync', '0', '-f', 'webp', 'pipe:1',
+        '-loop', '0', '-preset', 'default', '-an', '-vsync', '0', 
+        '-t', '3', // Max 3 seconds for WhatsApp
+        '-f', 'webp', 'pipe:1',
     ], inputBuf)
 }
 
@@ -127,17 +129,6 @@ function ffmpegFramesToAnimatedWebp(framesDir, inputFps = 30) {
         '-vcodec', 'libwebp_anim', '-lossless', '0', '-compression_level', '6', '-q:v', '75',
         '-loop', '0', '-preset', 'default', '-an', '-vsync', '0', '-f', 'webp', 'pipe:1',
     ])
-}
-
-async function makePackCover(stickerItems) {
-    const staticItem = stickerItems.find(item => !item.isAnimated)
-    if (staticItem) return staticToWebp(staticItem.data)
-
-    const first = stickerItems[0]?.data
-    if (!first) return null
-    try {
-        return await sharp(first, { animated: true, page: 0, pages: 1 }).webp({ quality: 90, lossless: false, effort: 4 }).toBuffer()
-    } catch { return null }
 }
 
 async function tgsToAnimatedWebp(buf) {
@@ -252,7 +243,23 @@ export default {
                         webpBuf = await ffmpegToAnimatedWebp(rawBuf)
                         if (!webpBuf) { failed++; continue }
                     } else if (sticker.is_animated || filePath.endsWith('.tgs')) {
+                        // Try animated Lottie conversion first
                         webpBuf = await tgsToAnimatedWebp(rawBuf)
+                        
+                        // FALLBACK: If python/rlottie fails, grab the static thumbnail
+                        if (!webpBuf && sticker.thumb) {
+                            try {
+                                const thumbRes = await getJson(`${TG_API}/getFile?file_id=${encodeURIComponent(sticker.thumb.file_id)}`)
+                                const thumbPath = thumbRes.data?.result?.file_path
+                                if (thumbPath) {
+                                    const thumbBuf = await dl(`${TG_FILE}/${thumbPath}`)
+                                    webpBuf = await staticToWebp(thumbBuf)
+                                }
+                            } catch (e) {
+                                console.error('[TG Sticker] Thumbnail fallback failed:', e.message)
+                            }
+                        }
+
                         if (!webpBuf) { skipped++; continue }
                     } else {
                         webpBuf = await staticToWebp(rawBuf)
@@ -265,7 +272,11 @@ export default {
                     }
 
                     // Send each sticker sequentially
-                    await sock.sendMessage(jid, { sticker: webpBuf }, { quoted: msg })
+                    await sock.sendMessage(jid, { 
+                        sticker: webpBuf,
+                        packname: PACK_NAME,
+                        author: PACK_PUBLISHER
+                    }, { quoted: msg })
                     sent++
                     
                     // Small delay to prevent WhatsApp rate limits
