@@ -31,7 +31,7 @@ export default {
       )
     }
 
-    // Unwrap the message to find the actual media type for validation
+    // 1. Unwrap the nested wrappers to find the actual media type
     let inner = quotedMsg
     while (
       inner?.viewOnceMessage || 
@@ -50,14 +50,13 @@ export default {
     if (!['imageMessage', 'videoMessage', 'audioMessage'].includes(mediaType)) {
       return await sock.sendMessage(
         jid,
-        { text: `❌ ${toSmallCaps('the quoted message is not a valid media.')}` },
+        { text: `❌ ${toSmallCaps('the quoted message is not a valid view once media.')}` },
         { quoted: message }
       )
     }
 
     try {
-      // Construct the fake message object. We pass the ORIGINAL quotedMsg 
-      // so Baileys can properly send the retry request if the URL is missing.
+      // 2. Construct a fake message with the correct Key info
       const fakeMsg = {
         key: {
           remoteJid: jid,
@@ -65,25 +64,52 @@ export default {
           participant: ctxInfo.participant,
           fromMe: false
         },
-        message: quotedMsg 
+        message: quotedMsg
       }
 
-      // downloadMediaMessage automatically handles missing URLs by requesting 
-      // WhatsApp to re-upload the media using the reuploadRequest parameter.
+      // 3. Download with custom Retry Handler
       const buffer = await downloadMediaMessage(
         fakeMsg,
         'buffer',
         {},
         {
           logger: console,
-          reuploadRequest: sock.updateMediaMessage
+          reuploadRequest: async (msg) => {
+            // Ask WhatsApp for a fresh URL
+            await sock.updateMediaMessage(msg)
+            
+            // Wait for WhatsApp to send the updated message back
+            return new Promise((resolve, reject) => {
+              const listener = (updates) => {
+                for (const update of updates) {
+                  if (update.key.id === msg.key.id && update.update.message) {
+                    sock.ev.off('messages.update', listener)
+                    clearTimeout(timer)
+                    resolve(update.update.message)
+                    return
+                  }
+                }
+              }
+              
+              sock.ev.on('messages.update', listener)
+              
+              // Timeout after 10 seconds if WhatsApp doesn't respond
+              const timer = setTimeout(() => {
+                sock.ev.off('messages.update', listener)
+                reject(new Error('Media retry timed out'))
+              }, 10000)
+            })
+          }
         }
       )
+
+      if (!buffer || buffer.length === 0) throw new Error('Empty buffer')
 
       const mediaNode = inner[mediaType]
       const targetMediaKey = mediaType.replace('Message', '')
       const caption = mediaNode?.caption || `🔓 *${toSmallCaps('view once revealed')}*`
 
+      // 4. Send the media back
       if (mediaType === 'audioMessage') {
         return await sock.sendMessage(
           jid,
@@ -104,9 +130,17 @@ export default {
 
     } catch (err) {
       console.error('[VIEWONCE] Extraction error:', err)
+      
+      let errMsg = toSmallCaps('failed to retrieve view once media.')
+      if (err.message.includes('No valid media URL') || err.message.includes('timed out')) {
+        errMsg = toSmallCaps('whatsapp has permanently deleted this media from their servers. it cannot be recovered.')
+      } else if (err.message.includes('Empty buffer')) {
+        errMsg = toSmallCaps('downloaded file was empty.')
+      }
+
       await sock.sendMessage(
         jid,
-        { text: `❌ ${toSmallCaps('failed to retrieve view once media. it may have been deleted from whatsapp servers.')}` },
+        { text: `❌ ${errMsg}` },
         { quoted: message }
       )
     }
