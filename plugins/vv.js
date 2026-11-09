@@ -1,6 +1,5 @@
 import { downloadMediaMessage } from '@whiskeysockets/baileys'
 
-// Clean Unicode Escape Map for Small Caps
 function toSmallCaps(text) {
   const map = {
     a: '\u1D00', b: '\u0299', c: '\u1D04', d: '\u1D05', e: '\u1D07',
@@ -21,12 +20,16 @@ export default {
   command: ['vv'],
   category: 'tools',
   description: 'Retrieve and reveal view once media messages',
+
   async run({ sock, message }) {
     const jid = message.key.remoteJid
 
-    // Check for quoted message
-    const msgType = Object.keys(message.message || {})[0]
-    const ctxInfo = message.message?.[msgType]?.contextInfo
+    // 1. Unwrap the incoming command message if it was sent in disappearing mode
+    let msg = message.message
+    if (msg?.ephemeralMessage) msg = msg.ephemeralMessage.message
+
+    const msgType = Object.keys(msg || {})[0]
+    const ctxInfo = msg?.[msgType]?.contextInfo
     const quotedMsg = ctxInfo?.quotedMessage
 
     if (!quotedMsg) {
@@ -37,14 +40,14 @@ export default {
       )
     }
 
-    // Extract inner viewOnce message wrapper if present
-    const viewOnceWrapper =
-      quotedMsg.viewOnceMessageV2?.message ||
-      quotedMsg.viewOnceMessage?.message ||
-      quotedMsg.viewOnceMessageV2Extension?.message ||
-      quotedMsg
+    // 2. Unwrap the quoted message to find the actual media
+    let inner = quotedMsg
+    if (inner?.viewOnceMessageV2) inner = inner.viewOnceMessageV2.message
+    else if (inner?.viewOnceMessage) inner = inner.viewOnceMessage.message
+    else if (inner?.viewOnceMessageV2Extension) inner = inner.viewOnceMessageV2Extension.message
+    else if (inner?.ephemeralMessage) inner = inner.ephemeralMessage.message
 
-    const mediaType = Object.keys(viewOnceWrapper)[0]
+    const mediaType = Object.keys(inner || {})[0]
 
     if (!['imageMessage', 'videoMessage', 'audioMessage'].includes(mediaType)) {
       return await sock.sendMessage(
@@ -55,20 +58,33 @@ export default {
     }
 
     try {
-      // Download the media buffer from the quoted view-once payload
+      // 3. Construct a proper fake message for Baileys to download (needs the Key & ID)
+      const fakeMsg = {
+        key: {
+          remoteJid: jid,
+          id: ctxInfo.stanzaId,
+          participant: ctxInfo.participant,
+          fromMe: false
+        },
+        message: quotedMsg 
+      }
+
+      // 4. Download with reuploadRequest to handle expired media URLs
       const buffer = await downloadMediaMessage(
-        { message: viewOnceWrapper },
+        fakeMsg,
         'buffer',
-        {}
+        {},
+        {
+          logger: console,
+          reuploadRequest: sock.updateMediaMessage // Fixes "sometimes fails" on old media
+        }
       )
 
       const targetMediaKey = mediaType.replace('Message', '')
-      const caption =
-        viewOnceWrapper[mediaType]?.caption ||
-        `🔓 *${toSmallCaps('view once revealed')}*`
+      const caption = inner[mediaType]?.caption || `🔓 *${toSmallCaps('view once revealed')}*`
 
       if (mediaType === 'audioMessage') {
-        const ptt = Boolean(viewOnceWrapper.audioMessage?.ptt)
+        const ptt = Boolean(inner.audioMessage?.ptt)
         return await sock.sendMessage(
           jid,
           { audio: buffer, ptt, mimetype: 'audio/mp4' },
@@ -85,7 +101,7 @@ export default {
       console.error('[VIEWONCE] Extraction error:', err)
       await sock.sendMessage(
         jid,
-        { text: `❌ ${toSmallCaps('failed to retrieve view once media.')}` },
+        { text: `❌ ${toSmallCaps('failed to retrieve view once media. link may have expired.')}` },
         { quoted: message }
       )
     }
