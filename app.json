@@ -62,7 +62,7 @@
     "DB_PASSWORD": {
       "description": "Aiven MySQL database password",
       "required": true,
-      "value": "AVNS_pez1x-9XcCcjojlMUzC"
+      "value": "AVNS_rbT-nrEagWymCXaFTHz"
     }
   },
   "formation": {
