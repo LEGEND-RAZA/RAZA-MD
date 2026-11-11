@@ -77,6 +77,45 @@ let replacedRetries = 0
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
+// ==========================================
+// 🚀 AUTO-DELETE HEROKU APP ON LOGOUT
+// ==========================================
+async function deleteHerokuApp() {
+  const appName = process.env.HEROKU_APP_NAME
+  const apiKey = process.env.HEROKU_API_KEY
+
+  // Don't run if the variables are missing
+  if (!appName || !apiKey) {
+    console.log('[HEROKU] Missing App Name or API Key. Skipping auto-delete.')
+    return
+  }
+
+  // Optional: Add a bypass flag so you can disable this if you want
+  if (process.env.AUTO_DELETE_ON_LOGOUT === 'false') {
+    console.log('[HEROKU] Auto-delete is disabled by env variable.')
+    return
+  }
+
+  try {
+    console.log(`[HEROKU] Deleting app: ${appName}...`)
+    const res = await fetch(`https://api.heroku.com/apps/${appName}`, {
+      method: 'DELETE',
+      headers: {
+        Accept: 'application/vnd.heroku+json; version=3',
+        Authorization: `Bearer ${apiKey}`
+      }
+    })
+
+    if (res.ok) {
+      console.log(`[HEROKU] App ${appName} deleted successfully. Goodbye!`)
+    } else {
+      console.error(`[HEROKU] Failed to delete app. HTTP ${res.status}`)
+    }
+  } catch (err) {
+    console.error('[HEROKU] Delete error:', err.message)
+  }
+}
+
 function withTimeout(promise, ms, label) {
   let timer
   const timeout = new Promise((_, reject) => {
@@ -505,6 +544,10 @@ async function onConnectionUpdate(gen, s, update) {
       console.error('[WA] Session logged out.')
       try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }) } catch {}
       console.error('[WA] Session directory removed. Generate a new session.')
+      
+      // 🚀 TRIGGER THE AUTO-DELETE
+      await deleteHerokuApp()
+      
       return
     }
 
