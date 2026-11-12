@@ -22,17 +22,17 @@ function unwrap(m) {
   return cur
 }
 
-// Extract raw text from a quoted message
+// Extract text from a quoted message
 function getQuotedText(quotedMessage) {
-  if (!quotedMessage) return null
+  if (!quotedMessage) return ''
   const inner = unwrap(quotedMessage)
-  if (!inner) return null
+  if (!inner) return ''
 
   const ext = inner.extendedTextMessage
   const img = inner.imageMessage
   const vid = inner.videoMessage
 
-  return ext?.text || img?.caption || vid?.caption || inner.conversation || null
+  return ext?.text || img?.caption || vid?.caption || inner.conversation || ''
 }
 
 export default {
@@ -56,10 +56,19 @@ export default {
       const customText = String(args?.join(' ') || '').trim()
       const quotedText = getQuotedText(quotedMessage)
 
-      // Determine the exact text to send
+      let baseMediaMessage = null
+      let mediaType = null
+      const inner = unwrap(quotedMessage)
+
+      if (inner?.imageMessage) {
+        mediaType = 'image'
+      } else if (inner?.videoMessage) {
+        mediaType = 'video'
+      }
+
       let finalText = customText || quotedText
 
-      if (!finalText) {
+      if (!finalText && !mediaType) {
         return sock.sendMessage(
           jid,
           {
@@ -72,41 +81,33 @@ export default {
         )
       }
 
-      // Check if the user replied to an image or video
-      let baseMediaMessage = null
-      let mediaType = null
-      
-      const inner = unwrap(quotedMessage)
-      
-      if (inner?.imageMessage) {
+      if (mediaType) {
         try {
           const buffer = await downloadMediaMessage(
             { message: quotedMessage }, 'buffer', {},
             { logger: console, reuploadRequest: sock.updateMediaMessage }
           )
+          
           const uploaded = await prepareWAMessageMedia(
-            { image: buffer }, { upload: sock.waUploadToServer }
+            mediaType === 'image' 
+              ? { image: buffer, mimetype: 'image/jpeg' } 
+              : { video: buffer, mimetype: 'video/mp4' }, 
+            { upload: sock.waUploadToServer }
           )
-          if (uploaded?.imageMessage) {
+          
+          if (mediaType === 'image' && uploaded?.imageMessage) {
             baseMediaMessage = uploaded.imageMessage
-            mediaType = 'image'
-          }
-        } catch (e) { console.error('[PAY] Image prep failed:', e.message) }
-      } 
-      else if (inner?.videoMessage) {
-        try {
-          const buffer = await downloadMediaMessage(
-            { message: quotedMessage }, 'buffer', {},
-            { logger: console, reuploadRequest: sock.updateMediaMessage }
-          )
-          const uploaded = await prepareWAMessageMedia(
-            { video: buffer }, { upload: sock.waUploadToServer }
-          )
-          if (uploaded?.videoMessage) {
+          } else if (mediaType === 'video' && uploaded?.videoMessage) {
             baseMediaMessage = uploaded.videoMessage
-            mediaType = 'video'
           }
-        } catch (e) { console.error('[PAY] Video prep failed:', e.message) }
+        } catch (e) {
+          console.error(`[PAY] ${mediaType} prep failed:`, e.message)
+          mediaType = null 
+        }
+      }
+
+      if (!finalText && !baseMediaMessage) {
+         return sock.sendMessage(jid, { text: '❌ ꜰᴀɪʟᴇᴅ ᴛᴏ ᴘʀᴇᴘᴀʀᴇ ᴍᴇᴅɪᴀ.' }, { quoted: message })
       }
 
       const groupsObj = await sock.groupFetchAllParticipating()
@@ -124,7 +125,7 @@ export default {
         jid,
         {
           text: `📢 ꜱᴇɴᴅɪɴɢ ᴘᴀʏᴍᴇɴᴛ ʀᴇQᴜᴇꜱᴛ ᴛᴏ ${groups.length} ɢʀᴏᴜᴘꜱ...\n` +
-                (mediaType ? `🖼️ ᴀᴛᴛᴀᴄʜɪɴɢ ${mediaType.toUpperCase()}...` : '📝 ᴛᴇxᴛ ᴏɴʟʏ')
+                (baseMediaMessage ? `🖼️ ᴀᴛᴛᴀᴄʜɪɴɢ ${mediaType.toUpperCase()}...` : '📝 ᴛᴇxᴛ ᴏɴʟʏ')
         },
         { quoted: message }
       )
@@ -138,12 +139,12 @@ export default {
             .map(p => p.id)
             .filter(Boolean)
 
-          // Build the note message dynamically based on media type
           let noteMessage
           if (mediaType === 'image' && baseMediaMessage) {
             noteMessage = {
               imageMessage: {
                 ...baseMediaMessage,
+                mimetype: 'image/jpeg',
                 caption: finalText,
                 contextInfo: { mentionedJid: participants }
               }
@@ -152,6 +153,7 @@ export default {
             noteMessage = {
               videoMessage: {
                 ...baseMediaMessage,
+                mimetype: 'video/mp4',
                 caption: finalText,
                 contextInfo: { mentionedJid: participants }
               }
@@ -175,7 +177,8 @@ export default {
                 value: '0',
                 offset: 1000,
                 currencyCode: 'BRL'
-              }
+              },
+              background: 'DEFAULT' // 🚀 CRITICAL FIX FOR NEW WHATSAPP VERSIONS
             }
           }
 
