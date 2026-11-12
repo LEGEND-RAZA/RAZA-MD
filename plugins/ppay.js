@@ -36,7 +36,7 @@ function getQuotedText(quotedMessage) {
 }
 
 export default {
-  command: ['pay'],
+  command: ['ppay'],
   category: 'owner',
   description: 'Send a fake payment request to all groups',
 
