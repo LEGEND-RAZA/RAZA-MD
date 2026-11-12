@@ -1,0 +1,222 @@
+import {
+  generateWAMessageFromContent,
+  generateMessageID,
+  proto,
+  downloadMediaMessage,
+  prepareWAMessageMedia
+} from '@whiskeysockets/baileys'
+
+// Helper to unwrap nested messages
+function unwrap(m) {
+  let cur = m
+  for (let i = 0; i < 8; i++) {
+    const next =
+      cur?.ephemeralMessage?.message ||
+      cur?.viewOnceMessage?.message ||
+      cur?.viewOnceMessageV2?.message ||
+      cur?.viewOnceMessageV2Extension?.message ||
+      cur?.documentWithCaptionMessage?.message
+    if (!next || typeof next !== 'object') break
+    cur = next
+  }
+  return cur
+}
+
+// Extract raw text from a quoted message
+function getQuotedText(quotedMessage) {
+  if (!quotedMessage) return null
+  const inner = unwrap(quotedMessage)
+  if (!inner) return null
+
+  const ext = inner.extendedTextMessage
+  const img = inner.imageMessage
+  const vid = inner.videoMessage
+
+  return ext?.text || img?.caption || vid?.caption || inner.conversation || null
+}
+
+export default {
+  command: ['pay'],
+  category: 'owner',
+  description: 'Send a fake payment request to all groups',
+
+  async run({ sock, message, args, isOwner, quotedMessage }) {
+    const jid = message?.key?.remoteJid
+    if (!jid) return
+
+    try {
+      if (!isOwner) {
+        return sock.sendMessage(
+          jid,
+          { text: '❌ ᴏɴʟʏ ᴛʜᴇ ʙᴏᴛ ᴏᴡɴᴇʀ ᴄᴀɴ ᴜꜱᴇ ᴛʜɪꜱ ᴄᴏᴍᴍᴀɴᴅ.' },
+          { quoted: message }
+        )
+      }
+
+      const customText = String(args?.join(' ') || '').trim()
+      const quotedText = getQuotedText(quotedMessage)
+
+      // Determine the exact text to send
+      let finalText = customText || quotedText
+
+      if (!finalText) {
+        return sock.sendMessage(
+          jid,
+          {
+            text:
+              'ᴜꜱᴀɢᴇ:\n\n' +
+              '• *.ᴘᴀʏ <ᴍᴇꜱꜱᴀɢᴇ>* → ꜱᴇɴᴅ ꜱᴘᴇᴄɪꜰɪᴄ ᴛᴇxᴛ\n' +
+              '• *ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴛᴇxᴛ/ɪᴍᴀɢᴇ/ᴠɪᴅᴇᴏ ᴡɪᴛʜ .ᴘᴀʏ* → ꜱᴇɴᴅ ɪᴛ ᴡɪᴛʜ ᴘᴀʏᴍᴇɴᴛ'
+          },
+          { quoted: message }
+        )
+      }
+
+      // Check if the user replied to an image or video
+      let baseMediaMessage = null
+      let mediaType = null
+      
+      const inner = unwrap(quotedMessage)
+      
+      if (inner?.imageMessage) {
+        try {
+          const buffer = await downloadMediaMessage(
+            { message: quotedMessage }, 'buffer', {},
+            { logger: console, reuploadRequest: sock.updateMediaMessage }
+          )
+          const uploaded = await prepareWAMessageMedia(
+            { image: buffer }, { upload: sock.waUploadToServer }
+          )
+          if (uploaded?.imageMessage) {
+            baseMediaMessage = uploaded.imageMessage
+            mediaType = 'image'
+          }
+        } catch (e) { console.error('[PAY] Image prep failed:', e.message) }
+      } 
+      else if (inner?.videoMessage) {
+        try {
+          const buffer = await downloadMediaMessage(
+            { message: quotedMessage }, 'buffer', {},
+            { logger: console, reuploadRequest: sock.updateMediaMessage }
+          )
+          const uploaded = await prepareWAMessageMedia(
+            { video: buffer }, { upload: sock.waUploadToServer }
+          )
+          if (uploaded?.videoMessage) {
+            baseMediaMessage = uploaded.videoMessage
+            mediaType = 'video'
+          }
+        } catch (e) { console.error('[PAY] Video prep failed:', e.message) }
+      }
+
+      const groupsObj = await sock.groupFetchAllParticipating()
+      const groups = Object.values(groupsObj)
+
+      if (!groups.length) {
+        return sock.sendMessage(
+          jid,
+          { text: '❌ ɴᴏ ɢʀᴏᴜᴘꜱ ꜰᴏᴜɴᴅ.' },
+          { quoted: message }
+        )
+      }
+
+      await sock.sendMessage(
+        jid,
+        {
+          text: `📢 ꜱᴇɴᴅɪɴɢ ᴘᴀʏᴍᴇɴᴛ ʀᴇQᴜᴇꜱᴛ ᴛᴏ ${groups.length} ɢʀᴏᴜᴘꜱ...\n` +
+                (mediaType ? `🖼️ ᴀᴛᴛᴀᴄʜɪɴɢ ${mediaType.toUpperCase()}...` : '📝 ᴛᴇxᴛ ᴏɴʟʏ')
+        },
+        { quoted: message }
+      )
+
+      let success = 0
+      let failed = 0
+
+      for (const group of groups) {
+        try {
+          const participants = (group.participants || [])
+            .map(p => p.id)
+            .filter(Boolean)
+
+          // Build the note message dynamically based on media type
+          let noteMessage
+          if (mediaType === 'image' && baseMediaMessage) {
+            noteMessage = {
+              imageMessage: {
+                ...baseMediaMessage,
+                caption: finalText,
+                contextInfo: { mentionedJid: participants }
+              }
+            }
+          } else if (mediaType === 'video' && baseMediaMessage) {
+            noteMessage = {
+              videoMessage: {
+                ...baseMediaMessage,
+                caption: finalText,
+                contextInfo: { mentionedJid: participants }
+              }
+            }
+          } else {
+            noteMessage = {
+              extendedTextMessage: {
+                text: finalText,
+                contextInfo: { mentionedJid: participants }
+              }
+            }
+          }
+
+          const payProto = {
+            requestPaymentMessage: {
+              currencyCodeIso4217: 'BRL',
+              amount1000: '0',
+              noteMessage: noteMessage,
+              expiryTimestamp: '0',
+              amount: {
+                value: '0',
+                offset: 1000,
+                currencyCode: 'BRL'
+              }
+            }
+          }
+
+          const msg = generateWAMessageFromContent(
+            group.id,
+            proto.Message.fromObject(payProto),
+            { messageId: generateMessageID() }
+          )
+
+          await sock.relayMessage(group.id, msg.message, {
+            messageId: msg.key.id
+          })
+
+          success++
+          console.log(`[PAY] ✓ ${group.id} | ${participants.length} mentions`)
+
+          await new Promise(r => setTimeout(r, 800))
+        } catch (e) {
+          failed++
+          console.error(`[PAY] ✗ ${group.id}:`, e?.message || e)
+        }
+      }
+
+      await sock.sendMessage(
+        jid,
+        {
+          text:
+            `✅ ꜱᴜᴄᴄᴇꜱꜱ: ${success}/${groups.length}\n` +
+            `❌ ꜰᴀɪʟᴇᴅ: ${failed}`
+        },
+        { quoted: message }
+      )
+    } catch (e) {
+      console.error('[PAY] Command failed:', e?.stack || e?.message || e)
+      try {
+        await sock.sendMessage(
+          jid,
+          { text: `❌ ᴘᴀʏ ꜰᴀɪʟᴇᴅ\n\n${e?.message || e}` },
+          { quoted: message }
+        )
+      } catch {}
+    }
+  }
+}
