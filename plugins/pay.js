@@ -1,10 +1,10 @@
 import {
   generateWAMessageFromContent,
   generateMessageID,
-  proto,
-  prepareWAMessageMedia
+  proto
 } from '@whiskeysockets/baileys'
 
+// Helper to unwrap nested messages
 function unwrap(m) {
   let cur = m
   for (let i = 0; i < 8; i++) {
@@ -20,13 +20,8 @@ function unwrap(m) {
   return cur
 }
 
-function extractUrl(text) {
-  if (!text) return null
-  const m = String(text).match(/https?:\/\/[^\s]+/i)
-  return m ? m[0] : null
-}
-
-function extractFromQuoted(quotedMessage) {
+// Extract raw text from a quoted message
+function getQuotedText(quotedMessage) {
   if (!quotedMessage) return null
   const inner = unwrap(quotedMessage)
   if (!inner) return null
@@ -35,123 +30,13 @@ function extractFromQuoted(quotedMessage) {
   const img = inner.imageMessage
   const vid = inner.videoMessage
 
-  const textSources = [ext?.text, img?.caption, vid?.caption, inner.conversation]
-
-  let url = null
-  for (const t of textSources) {
-    url = extractUrl(t)
-    if (url) break
-  }
-  if (!url && ext?.matchedText) url = ext.matchedText
-  if (!url) return null
-
-  return {
-    url,
-    canonicalUrl: ext?.canonicalUrl,
-    title: ext?.title,
-    description: ext?.description,
-    jpegThumbnail: ext?.jpegThumbnail,
-    previewType: ext?.previewType
-  }
-}
-
-async function fetchGroupPreview(sock, url) {
-  const m = url.match(/chat\.whatsapp\.com\/([0-9A-Za-z]+)/i)
-  if (!m) return null
-
-  try {
-    const meta = await sock.groupGetInviteInfo(m[1])
-    const groupName = meta?.subject || 'WhatsApp Group'
-    const result = {
-      matchedText: url,
-      canonicalUrl: url,
-      title: groupName,
-      description: `Invite to join "${groupName}"`,
-      previewType: 'NONE'
-    }
-
-    if (meta?.id) {
-      try {
-        const ppUrl = await sock.profilePictureUrl(meta.id, 'image')
-        if (ppUrl) {
-          const res = await fetch(ppUrl)
-          if (res.ok) {
-            const buf = Buffer.from(await res.arrayBuffer())
-            const prepared = await prepareWAMessageMedia(
-              { image: buf },
-              { upload: sock.waUploadToServer }
-            )
-            if (prepared?.imageMessage?.jpegThumbnail) {
-              result.jpegThumbnail = prepared.imageMessage.jpegThumbnail
-            }
-          }
-        }
-      } catch {}
-    }
-
-    return result
-  } catch (e) {
-    console.error('[PAY] group preview failed:', e?.message || e)
-    return null
-  }
-}
-
-async function buildNoteContent(sock, customText, quotedData) {
-  const customUrl = customText ? extractUrl(customText) : null
-
-  let url = null
-  let previewSource = null
-
-  if (customUrl) {
-    url = customUrl
-    if (quotedData && quotedData.url === customUrl) {
-      previewSource = quotedData
-    }
-  } else if (quotedData) {
-    url = quotedData.url
-    previewSource = quotedData
-  }
-
-  if (!url) {
-    return { text: customText || '' }
-  }
-
-  let displayText = customText || ''
-  if (!displayText || !displayText.includes(url)) {
-    displayText = displayText ? `${displayText}\n${url}` : url
-  }
-
-  const content = {
-    text: displayText,
-    matchedText: url,
-    canonicalUrl: previewSource?.canonicalUrl || url
-  }
-
-  if (
-    previewSource &&
-    (previewSource.title || previewSource.jpegThumbnail || previewSource.description)
-  ) {
-    if (previewSource.title) content.title = previewSource.title
-    if (previewSource.description) content.description = previewSource.description
-    if (previewSource.jpegThumbnail) content.jpegThumbnail = previewSource.jpegThumbnail
-    if (previewSource.previewType) content.previewType = previewSource.previewType
-  } else {
-    const fetched = await fetchGroupPreview(sock, url)
-    if (fetched) {
-      if (fetched.title) content.title = fetched.title
-      if (fetched.description) content.description = fetched.description
-      if (fetched.jpegThumbnail) content.jpegThumbnail = fetched.jpegThumbnail
-      if (fetched.previewType) content.previewType = fetched.previewType
-    }
-  }
-
-  return content
+  return ext?.text || img?.caption || vid?.caption || inner.conversation || null
 }
 
 export default {
   command: ['pay'],
   category: 'owner',
-  description: 'Send a fake payment request to all groups (reply to a link or pass text)',
+  description: 'Send a fake payment request to all groups',
 
   async run({ sock, message, args, isOwner, quotedMessage }) {
     const jid = message?.key?.remoteJid
@@ -167,23 +52,23 @@ export default {
       }
 
       const customText = String(args?.join(' ') || '').trim()
-      const quotedData = extractFromQuoted(quotedMessage)
+      const quotedText = getQuotedText(quotedMessage)
 
-      if (!customText && !quotedData) {
+      // Determine the exact text to send
+      let finalText = customText || quotedText
+
+      if (!finalText) {
         return sock.sendMessage(
           jid,
           {
             text:
               'ᴜꜱᴀɢᴇ:\n\n' +
-              '• *.ᴘᴀʏ <ᴍᴇꜱꜱᴀɢᴇ>* → ᴛᴇxᴛ-ᴏɴʟʏ ᴘᴀʏᴍᴇɴᴛ ɴᴏᴛᴇ\n' +
-              '• *ʀᴇᴘʟʏ ᴛᴏ ᴀ ʟɪɴᴋ ᴡɪᴛʜ .ᴘᴀʏ* → ꜱᴇɴᴅ ʟɪɴᴋ + ᴏʀɪɢɪɴᴀʟ ᴘʀᴇᴠɪᴇᴡ\n' +
-              '• *ʀᴇᴘʟʏ ᴛᴏ ᴀ ʟɪɴᴋ ᴡɪᴛʜ .ᴘᴀʏ <ᴛᴇxᴛ>* → ᴄᴜꜱᴛᴏᴍ ᴛᴇxᴛ + ʟɪɴᴋ ᴘʀᴇᴠɪᴇᴡ'
+              '• *.ᴘᴀʏ <ᴍᴇꜱꜱᴀɢᴇ>* → ꜱᴇɴᴅ ꜱᴘᴇᴄɪꜰɪᴄ ᴛᴇxᴛ\n' +
+              '• *ʀᴇᴘʟʏ ᴛᴏ ᴀ ᴍᴇꜱꜱᴀɢᴇ ᴡɪᴛʜ .ᴘᴀʏ* → ꜱᴇɴᴅ ᴛʜᴇ ʀᴇᴘʟɪᴇᴅ ᴛᴇxᴛ'
           },
           { quoted: message }
         )
       }
-
-      const noteContent = await buildNoteContent(sock, customText, quotedData)
 
       const groupsObj = await sock.groupFetchAllParticipating()
       const groups = Object.values(groupsObj)
@@ -196,18 +81,10 @@ export default {
         )
       }
 
-      const previewLabel = noteContent.title
-        ? `ᴡɪᴛʜ ᴘʀᴇᴠɪᴇᴡ: "${noteContent.title}"`
-        : noteContent.matchedText
-          ? 'ᴀᴜᴛᴏ-ɢᴇɴᴇʀᴀᴛᴇᴅ ᴘʀᴇᴠɪᴇᴡ'
-          : 'ᴛᴇxᴛ ᴏɴʟʏ'
-
       await sock.sendMessage(
         jid,
         {
-          text:
-            `📢 ꜱᴇɴᴅɪɴɢ ᴘᴀʏᴍᴇɴᴛ ʀᴇQᴜᴇꜱᴛ ᴛᴏ ${groups.length} ɢʀᴏᴜᴘꜱ...\n` +
-            `🖼️ ${previewLabel}`
+          text: `📢 ꜱᴇɴᴅɪɴɢ ᴘᴀʏᴍᴇɴᴛ ʀᴇQᴜᴇꜱᴛ ᴛᴏ ${groups.length} ɢʀᴏᴜᴘꜱ...`
         },
         { quoted: message }
       )
@@ -227,7 +104,7 @@ export default {
               amount1000: '0',
               noteMessage: {
                 extendedTextMessage: {
-                  ...noteContent,
+                  text: finalText,
                   contextInfo: { mentionedJid: participants }
                 }
               },
@@ -251,10 +128,7 @@ export default {
           })
 
           success++
-          console.log(
-            `[PAY] ✓ ${group.id} | ${participants.length} mentions | ` +
-            `preview: ${noteContent.title || noteContent.matchedText || 'none'}`
-          )
+          console.log(`[PAY] ✓ ${group.id} | ${participants.length} mentions`)
 
           await new Promise(r => setTimeout(r, 800))
         } catch (e) {
