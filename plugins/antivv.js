@@ -24,11 +24,15 @@ async function loadSettings() {
     return { ...DEFAULT_SETTINGS }
   }
 }
+
 async function saveSettings(s) {
-  try { await saveDb(SETTINGS_FILE, s) } catch (e) {
+  try { 
+    await saveDb(SETTINGS_FILE, s) 
+  } catch (e) {
     console.error('[ANTIVV] Settings save failed:', e?.message || e)
   }
 }
+
 function resolveTarget(settings, sock) {
   if (settings.targetJid) return settings.targetJid
   if (!sock?.user?.id) return null
@@ -45,6 +49,7 @@ function rememberPair(primary, alternate) {
   if (pLid && !aLid) { lidToPn.set(p, a); pnToLid.set(a, p) }
   else { lidToPn.set(a, p); pnToLid.set(p, a) }
 }
+
 function rememberMessageIdentities(message) {
   const k = message?.key || {}
   rememberPair(k.participant, k.participantAlt)
@@ -53,6 +58,7 @@ function rememberMessageIdentities(message) {
     rememberPair(message.participant, message.participantAlt)
   }
 }
+
 function resolveSenderJid(message) {
   const k = message?.key || {}, m = message || {}
   const candidates = [k.participant, k.participantAlt, k.remoteJidAlt, m.participant, m.participantAlt]
@@ -62,6 +68,7 @@ function resolveSenderJid(message) {
   for (const c of candidates) if (!c.endsWith('@lid')) return c
   return candidates[0] || ''
 }
+
 function displayNum(jid, fallback = 'unknown') {
   if (!jid) return fallback
   const s = String(jid), num = s.split('@')[0].split(':')[0]
@@ -70,7 +77,7 @@ function displayNum(jid, fallback = 'unknown') {
   return num
 }
 
-/* ============ UNWRAP (recursive, all wrapper types) ============ */
+/* ============ UNWRAP ============ */
 function deepUnwrap(m) {
   if (!m || typeof m !== 'object') return m
   let cur = m
@@ -89,15 +96,9 @@ function deepUnwrap(m) {
   return cur
 }
 
-/*
- * Return the inner VV content fully unwrapped, or null if not a VV message.
- * Outer wrapper order: groupStatus → ephemeral → VV → (any inner wrappers)
- */
 function unwrapViewOnce(message) {
   if (!message?.message) return null
-
   let m = message.message
-  // Strip outer (non-VV) wrappers first — these can repeat
   for (let i = 0; i < 10; i++) {
     const next =
       m.groupStatusMessageV2?.message ||
@@ -107,19 +108,16 @@ function unwrapViewOnce(message) {
     m = next
   }
 
-  // Now expect one of the VV wrappers at the top
   const vv =
     m.viewOnceMessage?.message ||
     m.viewOnceMessageV2?.message ||
     m.viewOnceMessageV2Extension?.message
 
   if (!vv) return null
-
-  // VV content may itself have documentWithCaption or another wrapper
   return deepUnwrap(vv)
 }
 
-/* ============ DOWNLOAD ============ */
+/* ============ DOWNLOAD & FORWARD ============ */
 async function downloadOnce(content, key) {
   const ctx = { logger, reconnectAttempts: 5, timeoutMs: 180000 }
   return downloadMediaMessage({ message: content, key }, 'buffer', {}, ctx)
@@ -130,9 +128,7 @@ async function downloadViewOnce(content, key) {
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       const buffer = await downloadOnce(content, key)
-      if (!Buffer.isBuffer(buffer) || !buffer.length) {
-        throw new Error('Empty media buffer')
-      }
+      if (!Buffer.isBuffer(buffer) || !buffer.length) throw new Error('Empty media buffer')
       return buffer
     } catch (e) {
       lastErr = e
@@ -143,16 +139,9 @@ async function downloadViewOnce(content, key) {
   throw lastErr
 }
 
-/* ============ FORWARD ============ */
 async function forwardViewOnce(sock, targetJid, message, inner) {
   const type = getContentType(inner)
-
-  if (!type) {
-    console.error('[ANTIVV] skip — no content type in unwrapped VV', {
-      keys: Object.keys(inner || {})
-    })
-    return null
-  }
+  if (!type) return null
 
   const senderJid = resolveSenderJid(message)
   const senderNum = displayNum(senderJid)
@@ -166,16 +155,11 @@ async function forwardViewOnce(sock, targetJid, message, inner) {
     groupJid ? `ɢʀᴏᴜᴘ  : ${groupJid}` : null
   ].filter(Boolean).join('\n')
 
-  if (DEBUG) console.log(`[ANTIVV] forwarding type=${type} keys=${Object.keys(inner).join(',')}`)
-
   const media = await downloadViewOnce(inner, message.key)
 
   if (media.length > MAX_MEDIA_BYTES) {
     await sock.sendMessage(targetJid, {
-      text:
-        `${caption}\n\n` +
-        `[Media too large: ${(media.length / 1024 / 1024).toFixed(1)} MB ` +
-        `— WA limit is ${MAX_MEDIA_BYTES / 1024 / 1024} MB]`
+      text: `${caption}\n\n[ᴍᴇᴅɪᴀ ᴛᴏᴏ ʟᴀʀɢᴇ: ${(media.length / 1024 / 1024).toFixed(1)} ᴍʙ]`
     })
     return type
   }
@@ -192,12 +176,6 @@ async function forwardViewOnce(sock, targetJid, message, inner) {
     opts.audio = media
     opts.mimetype = inner.audioMessage?.mimetype || 'audio/ogg; codecs=opus'
     opts.ptt = inner.audioMessage?.ptt === true
-    if (inner.audioMessage?.seconds) opts.seconds = Number(inner.audioMessage.seconds)
-    if (inner.audioMessage?.waveform) {
-      opts.waveform = Buffer.isBuffer(inner.audioMessage.waveform)
-        ? inner.audioMessage.waveform
-        : Buffer.from(inner.audioMessage.waveform)
-    }
   } else if (type === 'stickerMessage') {
     opts.sticker = media
   } else if (type === 'documentMessage') {
@@ -206,9 +184,7 @@ async function forwardViewOnce(sock, targetJid, message, inner) {
     opts.fileName = inner.documentMessage?.fileName || 'document'
     opts.caption = caption
   } else {
-    await sock.sendMessage(targetJid, {
-      text: `${caption}\n\n[Unsupported: ${type}]`
-    })
+    await sock.sendMessage(targetJid, { text: `${caption}\n\n[ᴜɴꜱᴜᴘᴘᴏʀᴛᴇᴅ: ${type}]` })
     return type
   }
 
@@ -232,36 +208,17 @@ export const antivvListener = {
       const inner = unwrapViewOnce(message)
       if (!inner) return
 
-      if (DEBUG) {
-        console.log(`[ANTIVV] VV detected from ${displayNum(resolveSenderJid(message))}`)
-      }
-
+      // MUST use await here since it's hitting the database
       const settings = await loadSettings()
-      if (!settings.enabled) {
-        if (DEBUG) console.log('[ANTIVV] disabled in settings')
-        return
-      }
+      if (!settings.enabled) return
 
       const targetJid = resolveTarget(settings, sock)
-      if (!targetJid) {
-        if (DEBUG) console.log('[ANTIVV] no target JID resolved')
-        return
-      }
+      if (!targetJid) return
 
       const type = await forwardViewOnce(sock, targetJid, message, inner)
       if (!type) return
 
-      const senderNum = displayNum(resolveSenderJid(message))
-      const isGroup = String(message.key.remoteJid || '').endsWith('@g.us')
-
-      console.log(
-        `[ANTIVV] ✓ forwarded ${type} from ${senderNum}` +
-        (isGroup ? ` in ${message.key.remoteJid}` : '')
-      )
-
-      try { await sock.readMessages([message.key]) } catch (e) {
-        console.error('[ANTIVV] readMessages failed:', e?.message || e)
-      }
+      try { await sock.readMessages([message.key]) } catch {}
     } catch (e) {
       console.error('[ANTIVV] Listener failed:', e?.stack || e?.message || e)
     }
@@ -269,67 +226,65 @@ export const antivvListener = {
 }
 
 /* ============ COMMAND ============ */
-const antivvCommand = {
-  command: 'antivv',
+export default {
+  command: ['antivv'],
   category: 'tools',
   description: 'Forward view-once messages to the owner',
 
-  async run({ sock, message, args = [], isOwner }) {
-    try {
-      const jid = message?.key?.remoteJid
-      if (!jid) return
-      const reply = text =>
-        sock.sendMessage(jid, { text }, { quoted: message }).catch(() => {})
+  async run(ctx) {
+    const { sock, message, args = [], isOwner } = ctx
+    const msg = message || ctx.msg
+    if (!sock || !msg) return
 
-      if (!isOwner) return reply('❌ ᴏɴʟʏ ᴛʜᴇ ʙᴏᴛ ᴏᴡɴᴇʀ ᴄᴀɴ ᴄʜᴀɴɢᴇ ᴀᴜᴛᴏ-ᴠᴠ ꜱᴇᴛᴛɪɴɢꜱ')
+    const jid = msg.key?.remoteJid
+    if (!jid) return
+    const reply = text => sock.sendMessage(jid, { text }, { quoted: msg }).catch(() => {})
 
-      const settings = await loadSettings()
-      const action = String(args[0] || 'status').toLowerCase()
+    if (!isOwner) return reply('❌ ᴏɴʟʏ ᴛʜᴇ ʙᴏᴛ ᴏᴡɴᴇʀ ᴄᴀɴ ᴄʜᴀɴɢᴇ ᴀᴜᴛᴏ-ᴠᴠ ꜱᴇᴛᴛɪɴɢꜱ')
 
-      switch (action) {
-        case 'on': case 'enable':
-          settings.enabled = true
-          await saveSettings(settings)
-          return reply('✅ ᴀᴜᴛᴏ ᴠɪᴇᴡ-ᴏɴᴄᴇ ʀᴇᴠᴇᴀʟ ᴇɴᴀʙʟᴇᴅ')
-        case 'off': case 'disable':
-          settings.enabled = false
-          await saveSettings(settings)
-          return reply('❌ ᴀᴜᴛᴏ ᴠɪᴇᴡ-ᴏɴᴄᴇ ʀᴇᴠᴇᴀʟ ᴅɪꜱᴀʙʟᴇᴅ')
-        case 'set': {
-          const raw = String(args[1] || '').trim()
-          if (!raw) return reply('ᴜꜱᴀɢᴇ: .antivv set <number|jid>')
-          const targetJid = raw.includes('@') ? raw : raw.replace(/\D/g, '') + '@s.whatsapp.net'
-          if (!/^[\w.-]+@(s\.whatsapp\.net|g\.us)$/i.test(targetJid)) return reply('❌ ɪɴᴠᴀʟɪᴅ ᴊɪᴅ')
-          settings.targetJid = targetJid
-          await saveSettings(settings)
-          return reply(`✅ ᴀᴜᴛᴏ-ᴠᴠ ᴛᴀʀɢᴇᴛ ꜱᴇᴛ ᴛᴏ\n${targetJid}`)
-        }
-        case 'reset':
-          settings.targetJid = ''
-          await saveSettings(settings)
-          return reply('✅ ᴀᴜᴛᴏ-ᴠᴠ ᴛᴀʀɢᴇᴛ ʀᴇꜱᴇᴛ ᴛᴏ ʙᴏᴛ ᴊɪᴅ')
-        case 'status': default: {
-          const target = resolveTarget(settings, sock)
-          return reply([
-            '╭━━━〔 ᴀᴜᴛᴏ ᴠɪᴇᴡ-ᴏɴᴄᴇ 〕', '│',
-            `│ ꜱᴛᴀᴛᴜꜱ : ${settings.enabled ? 'ᴏɴ ✅' : 'ᴏғғ ❌'}`,
-            `│ ᴛᴀʀɢᴇᴛ : ${settings.targetJid || '(bot jid)'}`,
-            `│ ʀᴇꜱᴏʟᴠᴇᴅ : ${target || '—'}`,
-            `│ ʟɪᴅ → ᴘɴ : ${lidToPn.size} ᴍᴀᴘᴘɪɴɢꜱ`,
-            `│ ᴍᴀx ᴍᴇᴅɪᴀ : ${MAX_MEDIA_BYTES / 1024 / 1024} ᴍʙ`,
-            '│',
-            '│ ᴄᴏᴍᴍᴀɴᴅꜱ',
-            '│ .antivv on', '│ .antivv off',
-            '│ .antivv set <number|jid>', '│ .antivv reset',
-            '│ .antivv status', '│',
-            '╰━━━━━━━━━━━━━━━━━━'
-          ].join('\n'))
-        }
+    // MUST use await here since it's hitting the database
+    const settings = await loadSettings()
+    const action = String(args[0] || 'status').toLowerCase()
+
+    switch (action) {
+      case 'on': case 'enable':
+        settings.enabled = true
+        await saveSettings(settings)
+        return reply('✅ ᴀᴜᴛᴏ ᴠɪᴇᴡ-ᴏɴᴄᴇ ʀᴇᴠᴇᴀʟ ᴇɴᴀʙʟᴇᴅ')
+      case 'off': case 'disable':
+        settings.enabled = false
+        await saveSettings(settings)
+        return reply('❌ ᴀᴜᴛᴏ ᴠɪᴇᴡ-ᴏɴᴄᴇ ʀᴇᴠᴇᴀʟ ᴅɪꜱᴀʙʟᴇᴅ')
+      case 'set': {
+        const raw = String(args[1] || '').trim()
+        if (!raw) return reply('ᴜꜱᴀɢᴇ: .antivv set <number|jid>')
+        const targetJid = raw.includes('@') ? raw : raw.replace(/\D/g, '') + '@s.whatsapp.net'
+        if (!/^[\w.-]+@(s\.whatsapp\.net|g\.us)$/i.test(targetJid)) return reply('❌ ɪɴᴠᴀʟɪᴅ ᴊɪᴅ')
+        settings.targetJid = targetJid
+        await saveSettings(settings)
+        return reply(`✅ ᴀᴜᴛᴏ-ᴠᴠ ᴛᴀʀɢᴇᴛ ꜱᴇᴛ ᴛᴏ\n${targetJid}`)
       }
-    } catch (e) {
-      console.error('[ANTIVV] Command failed:', e?.message || e)
+      case 'reset':
+        settings.targetJid = ''
+        await saveSettings(settings)
+        return reply('✅ ᴀᴜᴛᴏ-ᴠᴠ ᴛᴀʀɢᴇᴛ ʀᴇꜱᴇᴛ ᴛᴏ ʙᴏᴛ ᴊɪᴅ')
+      case 'status': default: {
+        const target = resolveTarget(settings, sock)
+        return reply([
+          '╭━━━〔 ᴀᴜᴛᴏ ᴠɪᴇᴡ-ᴏɴᴄᴇ 〕', '│',
+          `│ ꜱᴛᴀᴛᴜꜱ : ${settings.enabled ? 'ᴏɴ ✅' : 'ᴏꜰꜰ ❌'}`,
+          `│ ᴛᴀʀɢᴇᴛ : ${settings.targetJid || '(bot jid)'}`,
+          `│ ʀᴇꜱᴏʟᴠᴇᴅ : ${target || '—'}`,
+          `│ ʟɪᴅ → ᴘɴ : ${lidToPn.size} ᴍᴀᴘᴘɪɴɢꜱ`,
+          `│ ᴍᴀx ᴍᴇᴅɪᴀ : ${MAX_MEDIA_BYTES / 1024 / 1024} ᴍʙ`,
+          '│',
+          '│ ᴄᴏᴍᴍᴀɴᴅꜱ',
+          '│ .antivv on', '│ .antivv off',
+          '│ .antivv set <number|jid>', '│ .antivv reset',
+          '│ .antivv status', '│',
+          '╰━━━━━━━━━━━━━━━━━━'
+        ].join('\n'))
+      }
     }
   }
 }
-
-export default antivvCommand
