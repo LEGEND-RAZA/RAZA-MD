@@ -24,14 +24,6 @@ async function fetchJSON(url, options = {}) {
 
 const randomAppName = () => `raza-${crypto.randomBytes(4).toString('hex')}`
 
-// Pairing message body in Small Caps
-const pairingMessage = code => (
-  '🤖 *ʀᴀᴢᴀ ᴍᴅ*\n\n' +
-  '🔐 *ᴘᴀɪʀ ᴄᴏᴅᴇ*\n' +
-  '*' + code + '*\n\n' +
-  '👤 *ᴏᴡɴᴇʀ:* ʟᴇɢᴇɴᴅ ʀᴀᴢᴀ'
-)
-
 async function pairNumber(number, onCode) {
   const { res, data } = await fetchJSON(`${PAIR_SERVER}/api/pair`, {
     method: 'POST',
@@ -143,8 +135,6 @@ export default {
 
     let statusMsg = null
     
-    // We now edit the status message, because the code message has a button
-    // and WhatsApp does NOT allow editing messages with native buttons.
     const editStatus = async text => {
       if (!statusMsg) return
       try { await sock.sendMessage(jid, { text, edit: statusMsg.key }) }
@@ -157,16 +147,10 @@ export default {
 
       if (phoneValid(target)) {
         sessionId = await pairNumber(target, async code => {
-          // 1. Send the code with the native "Click To Copy" button
-          await sock.sendMessage(jid, {
-            text: pairingMessage(code),
-            footer: '📋 ᴄʟɪᴄᴋ ᴛᴏ ᴄᴏᴘʏ',
-            templateButtons: [
-              { index: 1, copy: code }
-            ]
-          }, { quoted: message })
+          // Send ONLY the raw code as a separate message
+          await sock.sendMessage(jid, { text: code }, { quoted: message })
 
-          // 2. Send a separate tiny status message that we CAN edit later
+          // Send a separate tiny status message that we CAN edit later
           statusMsg = await sock.sendMessage(jid, { text: '⏳ ᴡᴀɪᴛɪɴɢ ꜰᴏʀ ʏᴏᴜ ᴛᴏ ᴇɴᴛᴇʀ ᴛʜᴇ ᴄᴏᴅᴇ...' })
         })
         
