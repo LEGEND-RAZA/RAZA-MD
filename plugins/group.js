@@ -103,8 +103,10 @@ function getTarget(message, args = []) {
   const type = Object.keys(msg)[0]
   const context = msg[type]?.contextInfo || {}
 
+  // 🚀 FIX: Use participantAlt if available (fixes @lid issues)
   let target =
     context.mentionedJid?.[0] ||
+    context.participantAlt || 
     context.participant
 
   if (!target && args[0]) {
@@ -717,10 +719,21 @@ export default {
           ? 'demote'
           : 'remove'
 
+      const quoted = getQuotedMessage(message)
+
       try {
+        // 🚀 NEW: Delete the replied message if it's a kick/remove command
+        if (action === 'remove' && quoted?.key) {
+          await sock.sendMessage(jid, { delete: quoted.key }).catch((e) => {
+            console.error('[DELETE MESSAGE FAILED]:', e)
+          })
+        }
+
+        // Perform the kick/promote action
         await sock.groupParticipantsUpdate(jid, [target], action)
         return
-      } catch {
+      } catch (e) {
+        console.error('[GROUP ACTION ERROR]:', e)
         return await sock.sendMessage(
           jid,
           { text: `❌ ${toSmallCaps('action failed. ensure bot is an admin.')}` },
