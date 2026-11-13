@@ -27,16 +27,24 @@ function isBot(sock, jid) {
   const botLid = normalizeJid(sock.user.lid || '')
   const botNum = numberFromJid(botJid || sock.user.id || '')
 
-  if (targetJid && (targetJid === botJid || targetJid === botLid)) {
-    return true
-  }
-  if (targetNum && botNum && targetNum === botNum) {
-    return true
-  }
+  if (targetJid && (targetJid === botJid || targetJid === botLid)) return true
+  if (targetNum && botNum && targetNum === botNum) return true
   return false
 }
 
-// Clean Unicode Small Caps Mapping
+// 🚀 FIX: Dynamic LID resolver to translate @lid to real phone numbers
+async function resolveToPn(sock, jid) {
+  if (!jid) return ''
+  const normalized = normalizeJid(jid)
+  if (normalized.endsWith('@lid')) {
+    try {
+      const pn = await sock?.signalRepository?.lidMapping?.getPNForLID(normalized)
+      if (pn) return normalizeJid(pn)
+    } catch {}
+  }
+  return normalized
+}
+
 function toSmallCaps(text) {
   const map = {
     a: '\u1D00', b: '\u0299', c: '\u1D04', d: '\u1D05', e: '\u1D07',
@@ -46,11 +54,7 @@ function toSmallCaps(text) {
     u: '\u1D1C', v: '\u1D20', w: '\u1D21', x: 'x',      y: '\u028F',
     z: '\u1D22'
   }
-  return String(text || '')
-    .toLowerCase()
-    .split('')
-    .map((c) => map[c] || c)
-    .join('')
+  return String(text || '').toLowerCase().split('').map((c) => map[c] || c).join('')
 }
 
 /* =========================================================
@@ -64,9 +68,7 @@ const MANUAL_EXEMPT = [
 
 function isExempt(sock, jid) {
   if (!jid) return true
-  if (isBot(sock, jid)) {
-    return true
-  }
+  if (isBot(sock, jid)) return true
   return MANUAL_EXEMPT.includes(normalizeJid(jid))
 }
 
@@ -83,9 +85,7 @@ function rememberOwnAction(jid, action, users) {
   for (const user of users) {
     const key = actionKey(jid, action, [user])
     ownActions.set(key, Date.now())
-    setTimeout(() => {
-      ownActions.delete(key)
-    }, 15000)
+    setTimeout(() => { ownActions.delete(key) }, 15000)
   }
 }
 
@@ -122,39 +122,26 @@ export const antimodCommand = {
 
       if (!isAdmin && !isOwner) return
 
-      const storage = getDb(DB_KEY, {})
+      // 🚀 FIX: Added await here
+      const storage = await getDb(DB_KEY, {})
       const action = String(args?.[0] || '').trim().toLowerCase()
 
       if (action === 'on') {
         storage[jid] = true
-        saveDb(DB_KEY, storage)
-        return sock.sendMessage(
-          jid,
-          { text: `✅ *${toSmallCaps('anti-modification activated.')}*` },
-          { quoted: message }
-        )
+        await saveDb(DB_KEY, storage)
+        return sock.sendMessage(jid, { text: `✅ *${toSmallCaps('anti-modification activated.')}*` }, { quoted: message })
       }
 
       if (action === 'off') {
         delete storage[jid]
-        saveDb(DB_KEY, storage)
-        return sock.sendMessage(
-          jid,
-          { text: `❌ *${toSmallCaps('anti-modification deactivated.')}*` },
-          { quoted: message }
-        )
+        await saveDb(DB_KEY, storage)
+        return sock.sendMessage(jid, { text: `❌ *${toSmallCaps('anti-modification deactivated.')}*` }, { quoted: message })
       }
 
       const status = storage[jid] ? 'ON' : 'OFF'
-      return sock.sendMessage(
-        jid,
-        {
-          text:
-            `⚙️ *${toSmallCaps('anti-mod status')}:* ${status}\n\n` +
-            `*${toSmallCaps('usage')}:* !antimod on/off`
-        },
-        { quoted: message }
-      )
+      return sock.sendMessage(jid, {
+        text: `⚙️ *${toSmallCaps('anti-mod status')}:* ${status}\n\n*${toSmallCaps('usage')}:* !antimod on/off`
+      }, { quoted: message })
     } catch (error) {
       console.error('[ANTIMOD] Command error:', error)
     }
@@ -165,7 +152,8 @@ export const antimodCommand = {
    GROUP LISTENER
    ========================================================= */
 export const antimodListener = {
-  command: '__welcome_listener',
+  isGroupEvent: true,
+  
   async run({ sock, update }) {
     try {
       if (!update) return
@@ -175,24 +163,39 @@ export const antimodListener = {
       const action = update.action
       if (action !== 'promote' && action !== 'demote') return
 
-      const storage = getDb(DB_KEY, {})
+      // 🚀 FIX: Added await here
+      const storage = await getDb(DB_KEY, {})
       if (!storage[jid]) return
 
+      // Check if bot is actually an admin before trying to demote
+      const metadata = await sock.groupMetadata(jid).catch(() => null)
+      if (!metadata) return
+      
+      const botJid = normalizeJid(sock.user.id)
+      const botData = metadata.participants.find(p => normalizeJid(p.id) === botJid)
+      if (!botData?.admin) {
+        console.log(`[ANTIMOD] Bot is not admin in ${jid}, skipping.`)
+        return
+      }
+
       const rawParticipants = Array.isArray(update.participants) ? update.participants : []
-      const targets = rawParticipants
-        .map((p) => {
-          if (typeof p === 'string') return normalizeJid(p)
-          return normalizeJid(p?.id || p?.jid || p?.participant || '')
-        })
-        .filter(Boolean)
+      
+      // Extract phoneNumber from objects if they exist (handles @lid bug)
+      const targets = rawParticipants.map((p) => {
+        if (typeof p === 'string') return normalizeJid(p)
+        return normalizeJid(p?.phoneNumber || p?.id || p?.jid || p?.participant || '')
+      }).filter(Boolean)
 
       if (!targets.length) return
 
       // Ignore events created by AntiMod itself.
       if (wasOwnAction(jid, action, targets)) return
 
-      // Find actor who performed the action.
-      const actor = normalizeJid(update.author || update.actor || update.by || '')
+      // 🚀 FIX: Resolve the actor's LID to a real phone number dynamically
+      let actor = normalizeJid(update.author || update.actor || update.by || '')
+      if (actor) {
+        actor = await resolveToPn(sock, actor)
+      }
 
       // Never process the bot as actor.
       if (actor && isBot(sock, actor)) return
@@ -200,17 +203,10 @@ export const antimodListener = {
       // Filter non-exempt targets.
       const unsafeTargets = targets.filter((target) => !isExempt(sock, target))
 
-      /*
-       * PROMOTE: Someone promotes a participant.
-       * Target -> DEMOTE | Actor -> DEMOTE
-       */
+      /* ── PROMOTE ── */
       if (action === 'promote') {
         const toDemote = [...unsafeTargets]
-        if (
-          actor &&
-          !isExempt(sock, actor) &&
-          !toDemote.some((x) => normalizeJid(x) === normalizeJid(actor))
-        ) {
+        if (actor && !isExempt(sock, actor) && !toDemote.some((x) => normalizeJid(x) === actor)) {
           toDemote.push(actor)
         }
 
@@ -234,10 +230,7 @@ export const antimodListener = {
         return
       }
 
-      /*
-       * DEMOTE: Someone demotes a participant.
-       * Target -> PROMOTE BACK | Actor -> DEMOTE
-       */
+      /* ── DEMOTE ── */
       if (action === 'demote') {
         const botIsTarget = targets.some((target) => isBot(sock, target))
         const targetsToRestore = unsafeTargets.filter((target) => !isBot(sock, target))
