@@ -1,9 +1,4 @@
-import meowPkg from 'meowcaller-js'
-import { createPcmStream } from '../lib/audioHelper.js'
-import yts from 'yt-search'
 import fs from 'node:fs'
-
-const { Client, SourceFunc } = meowPkg
 
 export default {
   command: ['playcall', 'callmusic'],
@@ -29,6 +24,14 @@ export default {
     const tempFile = `./temp_audio_${Date.now()}.mp3`
 
     try {
+      // 🚀 DYNAMIC IMPORTS (Prevents plugin-loader from crashing)
+      const meowPkg = (await import('meowcaller-js')).default || (await import('meowcaller-js'))
+      const { Client, SourceFunc } = meowPkg
+      const yts = (await import('yt-search')).default
+      const { createPcmStream } = await import('../lib/audioHelper.js')
+      
+      if (!Client) throw new Error('meowcaller-js loaded but Client is undefined')
+
       await sock.sendMessage(jid, { text: `🔍 Searching and downloading "${songQuery}"...` })
 
       // 1. Search YouTube
@@ -36,19 +39,16 @@ export default {
       const video = search.videos[0]
       if (!video) throw new Error('Song not found')
 
-      // 2. Download audio to a temp file (using youtubei.js or your existing downloader)
-      // For this example, we assume you have a working downloader function.
-      // You can replace this with your existing .play logic.
+      // 2. Download audio to temp file
+      // ⚠️ YOU MUST ADD YOUR DOWNLOAD LOGIC HERE (e.g., from your .play plugin)
       // const buffer = await downloadAudio(video.url)
       // fs.writeFileSync(tempFile, buffer)
       
-      // If you don't have a downloader, you can use a direct URL for testing:
-      // const audioUrl = "https://example.com/song.mp3"
-      // But WhatsApp requires a file path for ffmpeg.
-      
-      // For now, let's assume you download it to tempFile.
-      // You MUST implement the download logic here.
-      
+      // Dummy file check for safety
+      if (!fs.existsSync(tempFile)) {
+         throw new Error('Audio download failed. You must implement the downloader logic inside playcall.js')
+      }
+
       // 3. Create PCM stream
       const pcmStream = await createPcmStream(tempFile)
 
@@ -57,13 +57,11 @@ export default {
       client.connect()
 
       // 5. Start the group call
-      // Note: The exact API for group calls might be `client.groupCall(...)`
-      // or `client.call({ group: groupJid })`. Check the library docs.
       call = await client.groupCall({ group: groupJid }) 
       
       await sock.sendMessage(jid, { text: '📞 Joining group call and streaming audio...' })
 
-      // 6. Stream audio when the call is ready
+      // 6. Stream audio when ready
       call.onReady(() => {
         const source = SourceFunc(async () => {
           return new Promise((resolve) => {
