@@ -32,7 +32,6 @@ function isBot(sock, jid) {
   return false
 }
 
-// 🚀 FIX: Dynamic LID resolver to translate @lid to real phone numbers
 async function resolveToPn(sock, jid) {
   if (!jid) return ''
   const normalized = normalizeJid(jid)
@@ -117,12 +116,15 @@ export const antimodCommand = {
       if (!metadata) return
 
       const sender = normalizeJid(message?.key?.participant || message?.participant || '')
-      const participant = metadata.participants.find((p) => normalizeJid(p.id) === sender)
+      
+      // 🚀 FIX: Check p.phoneNumber and p.lid as well
+      const participant = metadata.participants.find((p) => 
+        normalizeJid(p.id) === sender || normalizeJid(p.lid) === sender || normalizeJid(p.phoneNumber) === sender
+      )
       const isAdmin = Boolean(participant?.admin)
 
       if (!isAdmin && !isOwner) return
 
-      // 🚀 FIX: Added await here
       const storage = await getDb(DB_KEY, {})
       const action = String(args?.[0] || '').trim().toLowerCase()
 
@@ -163,7 +165,6 @@ export const antimodListener = {
       const action = update.action
       if (action !== 'promote' && action !== 'demote') return
 
-      // 🚀 FIX: Added await here
       const storage = await getDb(DB_KEY, {})
       if (!storage[jid]) return
 
@@ -171,16 +172,19 @@ export const antimodListener = {
       const metadata = await sock.groupMetadata(jid).catch(() => null)
       if (!metadata) return
       
-      const botJid = normalizeJid(sock.user.id)
-      const botData = metadata.participants.find(p => normalizeJid(p.id) === botJid)
-      if (!botData?.admin) {
+      // 🚀 FIX: Check both p.id and p.phoneNumber for the bot's admin status
+      const isBotAdmin = metadata.participants.some(p => 
+        (isBot(sock, p.id) || isBot(sock, p.phoneNumber)) && 
+        (p.admin === 'admin' || p.admin === 'superadmin')
+      )
+      
+      if (!isBotAdmin) {
         console.log(`[ANTIMOD] Bot is not admin in ${jid}, skipping.`)
         return
       }
 
       const rawParticipants = Array.isArray(update.participants) ? update.participants : []
       
-      // Extract phoneNumber from objects if they exist (handles @lid bug)
       const targets = rawParticipants.map((p) => {
         if (typeof p === 'string') return normalizeJid(p)
         return normalizeJid(p?.phoneNumber || p?.id || p?.jid || p?.participant || '')
@@ -188,19 +192,23 @@ export const antimodListener = {
 
       if (!targets.length) return
 
-      // Ignore events created by AntiMod itself.
       if (wasOwnAction(jid, action, targets)) return
 
-      // 🚀 FIX: Resolve the actor's LID to a real phone number dynamically
+      // 🚀 FIX: Resolve the actor's phone number using metadata if possible
       let actor = normalizeJid(update.author || update.actor || update.by || '')
       if (actor) {
-        actor = await resolveToPn(sock, actor)
+        const actorData = metadata.participants.find(p => 
+          normalizeJid(p.id) === actor || normalizeJid(p.lid) === actor || normalizeJid(p.phoneNumber) === actor
+        )
+        if (actorData?.phoneNumber) {
+          actor = normalizeJid(actorData.phoneNumber)
+        } else {
+          actor = await resolveToPn(sock, actor)
+        }
       }
 
-      // Never process the bot as actor.
       if (actor && isBot(sock, actor)) return
 
-      // Filter non-exempt targets.
       const unsafeTargets = targets.filter((target) => !isExempt(sock, target))
 
       /* ── PROMOTE ── */
