@@ -109,40 +109,65 @@ export const antimodCommand = {
   category: 'group',
   async run({ sock, message, args, isGroup, isOwner }) {
     try {
-      const jid = normalizeJid(message?.key?.remoteJid)
-      if (!isGroup || !jid.endsWith('@g.us')) return
-
-      const metadata = await sock.groupMetadata(jid).catch(() => null)
-      if (!metadata) return
-
-      const sender = normalizeJid(message?.key?.participant || message?.participant || '')
+      const currentJid = normalizeJid(message?.key?.remoteJid)
+      const action = String(args?.[0] || '').trim().toLowerCase()
       
-      // 🚀 FIX: Check p.phoneNumber and p.lid as well
-      const participant = metadata.participants.find((p) => 
-        normalizeJid(p.id) === sender || normalizeJid(p.lid) === sender || normalizeJid(p.phoneNumber) === sender
-      )
-      const isAdmin = Boolean(participant?.admin)
+      // 🚀 Check if a custom group JID was provided
+      let targetJid = args?.[1]?.trim()
+      
+      // Fallback: If no custom JID provided, use the current chat if it's a group
+      if (!targetJid && currentJid.endsWith('@g.us')) {
+        targetJid = currentJid
+      }
+
+      if (targetJid && !targetJid.endsWith('@g.us')) {
+        return sock.sendMessage(currentJid, { text: '❌ ɪɴᴠᴀʟɪᴅ ɢʀᴏᴜᴘ ᴊɪᴅ. ɪᴛ ᴍᴜsᴛ ᴇɴᴅ ᴡɪᴛʜ @g.us' }, { quoted: message })
+      }
+
+      // Permissions check
+      let isAdmin = false
+      if (currentJid.endsWith('@g.us')) {
+        const metadata = await sock.groupMetadata(currentJid).catch(() => null)
+        if (metadata) {
+          const sender = normalizeJid(message?.key?.participant || message?.participant || '')
+          const participant = metadata.participants.find((p) => 
+            normalizeJid(p.id) === sender || normalizeJid(p.lid) === sender || normalizeJid(p.phoneNumber) === sender
+          )
+          isAdmin = Boolean(participant?.admin)
+        }
+      }
 
       if (!isAdmin && !isOwner) return
 
       const storage = await getDb(DB_KEY, {})
-      const action = String(args?.[0] || '').trim().toLowerCase()
 
       if (action === 'on') {
-        storage[jid] = true
+        if (!targetJid) {
+          return sock.sendMessage(currentJid, { 
+            text: `⚠️ ᴜsᴀɢᴇ: .antimod on <ɢʀᴏᴜᴘ_ᴊɪᴅ>\nᴇxᴀᴍᴘʟᴇ: .antimod on 120363xxxx@g.us\n\n(ᴏʀ ᴜsᴇ .antimod on ɪɴsɪᴅᴇ ᴀ ɢʀᴏᴜᴘ)` 
+          }, { quoted: message })
+        }
+        storage[targetJid] = true
         await saveDb(DB_KEY, storage)
-        return sock.sendMessage(jid, { text: `✅ *${toSmallCaps('anti-modification activated.')}*` }, { quoted: message })
+        return sock.sendMessage(currentJid, { text: `✅ *${toSmallCaps('anti-modification activated for')}* ${targetJid}` }, { quoted: message })
       }
 
       if (action === 'off') {
-        delete storage[jid]
+        if (!targetJid) {
+          return sock.sendMessage(currentJid, { 
+            text: `⚠️ ᴜsᴀɢᴇ: .antimod off <ɢʀᴏᴜᴘ_ᴊɪᴅ>\nᴇxᴀᴍᴘʟᴇ: .antimod off 120363xxxx@g.us` 
+          }, { quoted: message })
+        }
+        delete storage[targetJid]
         await saveDb(DB_KEY, storage)
-        return sock.sendMessage(jid, { text: `❌ *${toSmallCaps('anti-modification deactivated.')}*` }, { quoted: message })
+        return sock.sendMessage(currentJid, { text: `❌ *${toSmallCaps('anti-modification deactivated for')}* ${targetJid}` }, { quoted: message })
       }
 
-      const status = storage[jid] ? 'ON' : 'OFF'
-      return sock.sendMessage(jid, {
-        text: `⚙️ *${toSmallCaps('anti-mod status')}:* ${status}\n\n*${toSmallCaps('usage')}:* !antimod on/off`
+      const status = targetJid && storage[targetJid] ? 'ON' : 'OFF'
+      const displayJid = targetJid || 'ɴᴏ ᴛᴀʀɢᴇᴛ ɢʀᴏᴜᴘ'
+
+      return sock.sendMessage(currentJid, {
+        text: `⚙️ *${toSmallCaps('anti-mod status')}:* ${status}\n*${toSmallCaps('group')}:* ${displayJid}\n\n*${toSmallCaps('usage')}:*\n!antimod on <jid>\n!antimod off <jid>`
       }, { quoted: message })
     } catch (error) {
       console.error('[ANTIMOD] Command error:', error)
@@ -151,7 +176,7 @@ export const antimodCommand = {
 }
 
 /* =========================================================
-   GROUP LISTENER
+   GROUP LISTENER (No changes needed here)
    ========================================================= */
 export const antimodListener = {
   isGroupEvent: true,
