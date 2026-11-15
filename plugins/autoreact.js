@@ -193,7 +193,10 @@ export const autoreactListener = {
   async run({ sock, message }) {
     try {
       if (!message?.key?.remoteJid) return
-      if (message.key.fromMe) return // Don't react to your own messages
+      
+      // 🚀 FIX: Removed the fromMe check so it reacts to its own messages.
+      // Added a check to prevent it from reacting to reactions (avoids loops).
+      if (message.message?.reactionMessage) return 
       
       const jid = message.key.remoteJid
       const isGroup = jid.endsWith('@g.us')
