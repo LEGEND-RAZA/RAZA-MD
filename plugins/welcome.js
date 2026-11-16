@@ -34,16 +34,16 @@ function normalizeGroupJid(jid) {
   return normalizeJid(jid).split(':')[0]
 }
 
-function getSettings(jid) {
-  const storage = getDb(DB_KEY, {})
+// 🚀 FIX: Added async/await to read from MySQL properly
+async function getSettings(jid) {
+  const storage = await getDb(DB_KEY, {})
 
   if (!storage[jid]) {
     storage[jid] = {
       enabled: false,
       text: defaultWelcomeText()
     }
-
-    saveDb(DB_KEY, storage)
+    await saveDb(DB_KEY, storage)
   }
 
   return storage[jid]
@@ -53,7 +53,6 @@ function getDedupeMap() {
   if (!(globalThis[DEDUPE_KEY] instanceof Map)) {
     globalThis[DEDUPE_KEY] = new Map()
   }
-
   return globalThis[DEDUPE_KEY]
 }
 
@@ -67,25 +66,15 @@ function cleanDedupeMap(map, now = Date.now()) {
 
 function getParticipantId(item) {
   if (typeof item === 'string') return item
-
   if (!item || typeof item !== 'object') return ''
-
   return (
-    item.id ||
-    item.jid ||
-    item.phoneNumber ||
-    item.participantPn ||
-    item.lid ||
-    ''
+    item.id || item.jid || item.phoneNumber || item.participantPn || item.lid || ''
   )
 }
 
-/*
- * ==============================
+/* ==============================
  * WELCOME COMMAND
- * ==============================
- */
-
+ * ============================== */
 export const welcomeCommand = {
   command: ['welcome', 'setwelcome'],
   category: 'group',
@@ -93,117 +82,62 @@ export const welcomeCommand = {
 
   async run({ sock, message, args, isGroup, isOwner }) {
     const jid = message?.key?.remoteJid
-
     if (!jid || !isGroup) return
 
-    const metadata = await sock
-      .groupMetadata(jid)
-      .catch(() => null)
-
+    const metadata = await sock.groupMetadata(jid).catch(() => null)
     if (!metadata) return
 
-    const sender = normalizeJid(
-      message?.key?.participant ||
-      message?.key?.participantPn ||
-      ''
-    ).split(':')[0]
-
+    const sender = normalizeJid(message?.key?.participant || message?.key?.participantPn || '').split(':')[0]
     const isAdmin = (metadata.participants || []).some(participant => {
-      const participantId = normalizeJid(
-        participant.id || participant.jid || ''
-      ).split(':')[0]
-
-      return (
-        participantId === sender &&
-        (
-          participant.admin === 'admin' ||
-          participant.admin === 'superadmin'
-        )
-      )
+      const participantId = normalizeJid(participant.id || participant.jid || '').split(':')[0]
+      return participantId === sender && (participant.admin === 'admin' || participant.admin === 'superadmin')
     })
 
     if (!isAdmin && !isOwner) return
 
     const cmd = String(args?.[0] || '').toLowerCase()
-    const storage = getDb(DB_KEY, {})
-    const settings = getSettings(jid)
+    const storage = await getDb(DB_KEY, {}) // 🚀 Fixed await
+    const settings = await getSettings(jid) // 🚀 Fixed await
 
     if (cmd === 'on') {
       settings.enabled = true
       storage[jid] = settings
-      saveDb(DB_KEY, storage)
-
-      return sock.sendMessage(
-        jid,
-        { text: `✅ ${toSmallCaps('welcome message enabled')}` },
-        { quoted: message }
-      )
+      await saveDb(DB_KEY, storage)
+      return sock.sendMessage(jid, { text: `✅ ${toSmallCaps('welcome message enabled')}` }, { quoted: message })
     }
 
     if (cmd === 'off') {
       settings.enabled = false
       storage[jid] = settings
-      saveDb(DB_KEY, storage)
-
-      return sock.sendMessage(
-        jid,
-        { text: `❌ ${toSmallCaps('welcome message disabled')}` },
-        { quoted: message }
-      )
+      await saveDb(DB_KEY, storage)
+      return sock.sendMessage(jid, { text: `❌ ${toSmallCaps('welcome message disabled')}` }, { quoted: message })
     }
 
     if (cmd === 'set') {
       const customMsg = args.slice(1).join(' ').trim()
-
       if (!customMsg) {
-        return sock.sendMessage(
-          jid,
-          {
-            text:
-              `⚠️ ${toSmallCaps('please provide a text message.')}\n\n` +
-              `*${toSmallCaps('example')}:*\n` +
-              `${getPrefixForExample()}welcome set Welcome &mention to &group!`
-          },
-          { quoted: message }
-        )
+        return sock.sendMessage(jid, {
+          text: `⚠️ ${toSmallCaps('please provide a text message.')}\n\n*${toSmallCaps('example')}:*\n${getPrefixForExample()}welcome set Welcome &mention to &group!`
+        }, { quoted: message })
       }
-
       settings.text = customMsg
       settings.enabled = true
       storage[jid] = settings
-      saveDb(DB_KEY, storage)
-
-      return sock.sendMessage(
-        jid,
-        { text: `✅ ${toSmallCaps('welcome message updated successfully!')}` },
-        { quoted: message }
-      )
+      await saveDb(DB_KEY, storage)
+      return sock.sendMessage(jid, { text: `✅ ${toSmallCaps('welcome message updated successfully!')}` }, { quoted: message })
     }
 
     if (cmd === 'get') {
-      return sock.sendMessage(
-        jid,
-        {
-          text:
-            `📌 *${toSmallCaps('current welcome message')}:*\n\n` +
-            settings.text
-        },
-        { quoted: message }
-      )
+      return sock.sendMessage(jid, {
+        text: `📌 *${toSmallCaps('current welcome message')}:*\n\n` + settings.text
+      }, { quoted: message })
     }
 
     if (cmd === 'reset') {
       settings.text = defaultWelcomeText()
       storage[jid] = settings
-      saveDb(DB_KEY, storage)
-
-      return sock.sendMessage(
-        jid,
-        {
-          text: `✅ ${toSmallCaps('welcome message reset to default.')}`
-        },
-        { quoted: message }
-      )
+      await saveDb(DB_KEY, storage)
+      return sock.sendMessage(jid, { text: `✅ ${toSmallCaps('welcome message reset to default.')}` }, { quoted: message })
     }
 
     const status = settings.enabled ? 'ON' : 'OFF'
@@ -221,11 +155,7 @@ export const welcomeCommand = {
       `• \`&mention\` - Tags new member\n` +
       `• \`&group\` - Group name`
 
-    return sock.sendMessage(
-      jid,
-      { text: menu },
-      { quoted: message }
-    )
+    return sock.sendMessage(jid, { text: menu }, { quoted: message })
   }
 }
 
@@ -233,12 +163,9 @@ function getPrefixForExample() {
   return process.env.PREFIX || '.'
 }
 
-/*
- * ==============================
+/* ==============================
  * WELCOME EVENT LISTENER
- * ==============================
- */
-
+ * ============================== */
 export const welcomeListener = {
   command: '__welcome_listener',
 
@@ -249,33 +176,21 @@ export const welcomeListener = {
     const groupJid = normalizeGroupJid(rawGroupJid)
     const { participants, action } = update
 
-    if (
-      !groupJid.endsWith('@g.us') ||
-      action !== 'add' ||
-      !Array.isArray(participants) ||
-      participants.length === 0
-    ) {
+    if (!groupJid.endsWith('@g.us') || action !== 'add' || !Array.isArray(participants) || participants.length === 0) {
       return
     }
 
-    const storage = getDb(DB_KEY, {})
-    const settings =
-      storage[rawGroupJid] ||
-      storage[groupJid]
+    // 🚀 FIX: Await the database call
+    const storage = await getDb(DB_KEY, {})
+    const settings = storage[rawGroupJid] || storage[groupJid]
 
     if (!settings?.enabled) return
 
     const now = Date.now()
     const processed = getDedupeMap()
-
     cleanDedupeMap(processed, now)
 
-    /*
-     * Claim each participant synchronously before the first await.
-     * This prevents overlapping duplicate events from sending twice.
-     */
     const claimed = []
-
     for (const participant of participants) {
       const participantJid = getParticipantId(participant)
       if (!participantJid) continue
@@ -284,131 +199,73 @@ export const welcomeListener = {
       const dedupeKey = `${groupJid}:${dedupeId}`
       const previous = processed.get(dedupeKey)
 
-      if (
-        previous !== undefined &&
-        now - previous < DEDUPE_WINDOW
-      ) {
-        continue
-      }
+      if (previous !== undefined && now - previous < DEDUPE_WINDOW) continue
 
       processed.set(dedupeKey, now)
-
-      claimed.push({
-        participantJid,
-        dedupeId,
-        dedupeKey
-      })
+      claimed.push({ participantJid, dedupeId, dedupeKey })
     }
 
     if (!claimed.length) return
 
     try {
-      const metadata = await sock
-        .groupMetadata(rawGroupJid)
-        .catch(() => null)
-
+      const metadata = await sock.groupMetadata(rawGroupJid).catch(() => null)
       const groupName = metadata?.subject || 'Group'
       const canonicalByAlias = new Map()
 
-      /*
-       * Match alternate participant identifiers when Baileys
-       * exposes them in the group participant metadata.
-       */
       for (const participant of metadata?.participants || []) {
-        const ids = [
-          participant.id,
-          participant.jid,
-          participant.phoneNumber,
-          participant.lid,
-          participant.participantPn
-        ]
+        const ids = [participant.id, participant.jid, participant.phoneNumber, participant.lid, participant.participantPn]
           .filter(Boolean)
           .map(normalizeJid)
 
-        const phoneJid = ids.find(id =>
-          id.endsWith('@s.whatsapp.net')
-        )
-
+        const phoneJid = ids.find(id => id.endsWith('@s.whatsapp.net'))
         const canonical = phoneJid || ids[0]
         if (!canonical) continue
 
-        for (const id of ids) {
-          canonicalByAlias.set(id, canonical)
-        }
+        for (const id of ids) canonicalByAlias.set(id, canonical)
       }
 
-      const latestStorage = getDb(DB_KEY, {})
-      const latestSettings =
-        latestStorage[rawGroupJid] ||
-        latestStorage[groupJid]
+      // 🚀 FIX: Await the database call
+      const latestStorage = await getDb(DB_KEY, {})
+      const latestSettings = latestStorage[rawGroupJid] || latestStorage[groupJid]
 
       if (!latestSettings?.enabled) {
-        for (const user of claimed) {
-          processed.delete(user.dedupeKey)
-        }
+        for (const user of claimed) processed.delete(user.dedupeKey)
         return
       }
 
       const queued = new Map()
-
       for (const user of claimed) {
-        const canonical =
-          canonicalByAlias.get(user.participantJid) ||
-          canonicalByAlias.get(user.dedupeId) ||
-          user.dedupeId
-
+        const canonical = canonicalByAlias.get(user.participantJid) || canonicalByAlias.get(user.dedupeId) || user.dedupeId
         const canonicalKey = `${groupJid}:${canonical}`
         const canonicalTime = processed.get(canonicalKey)
 
-        /*
-         * If this event used an alternate JID but another event
-         * already claimed its canonical identity, don't send again.
-         */
-        if (
-          canonicalKey !== user.dedupeKey &&
-          canonicalTime !== undefined &&
-          now - canonicalTime < DEDUPE_WINDOW
-        ) {
+        if (canonicalKey !== user.dedupeKey && canonicalTime !== undefined && now - canonicalTime < DEDUPE_WINDOW) {
           processed.delete(user.dedupeKey)
           continue
         }
 
         processed.set(canonicalKey, now)
-
-        const mentionJid =
-          user.participantJid.endsWith('@s.whatsapp.net')
-            ? user.participantJid
-            : canonical
+        const mentionJid = user.participantJid.endsWith('@s.whatsapp.net') ? user.participantJid : canonical
 
         if (!queued.has(canonicalKey)) {
-          queued.set(canonicalKey, {
-            canonicalKey,
-            mentionJid
-          })
+          queued.set(canonicalKey, { canonicalKey, mentionJid })
         }
       }
 
       for (const user of queued.values()) {
         try {
-          const currentStorage = getDb(DB_KEY, {})
-          const currentSettings =
-            currentStorage[rawGroupJid] ||
-            currentStorage[groupJid]
+          // 🚀 FIX: Await the database call
+          const currentStorage = await getDb(DB_KEY, {})
+          const currentSettings = currentStorage[rawGroupJid] || currentStorage[groupJid]
 
           if (!currentSettings?.enabled) {
             processed.delete(user.canonicalKey)
             continue
           }
 
-          const template = String(
-            currentSettings.text || defaultWelcomeText()
-          )
-
+          const template = String(currentSettings.text || defaultWelcomeText())
           const text = template
-            .replace(
-              /&mention/g,
-              `@${user.mentionJid.split('@')[0]}`
-            )
+            .replace(/&mention/g, `@${user.mentionJid.split('@')[0]}`)
             .replace(/&group/g, groupName)
 
           await sock.sendMessage(groupJid, {
@@ -417,22 +274,12 @@ export const welcomeListener = {
           })
         } catch (error) {
           processed.delete(user.canonicalKey)
-
-          console.error(
-            '[Welcome Send Error]',
-            error?.stack || error?.message || error
-          )
+          console.error('[Welcome Send Error]', error?.stack || error?.message || error)
         }
       }
     } catch (error) {
-      for (const user of claimed) {
-        processed.delete(user.dedupeKey)
-      }
-
-      console.error(
-        '[Welcome Listener Error]',
-        error?.stack || error?.message || error
-      )
+      for (const user of claimed) processed.delete(user.dedupeKey)
+      console.error('[Welcome Listener Error]', error?.stack || error?.message || error)
     }
   }
 }
