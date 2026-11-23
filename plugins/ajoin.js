@@ -16,12 +16,7 @@ function toSmallCaps(text) {
     u: '\u1D1C', v: '\u1D20', w: '\u1D21', x: 'x', y: '\u028F',
     z: '\u1D22'
   }
-
-  return String(text || '')
-    .toLowerCase()
-    .split('')
-    .map(char => map[char] || char)
-    .join('')
+  return String(text || '').toLowerCase().split('').map(char => map[char] || char).join('')
 }
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -34,7 +29,7 @@ export default {
   async run({ sock, message, args, isOwner }) {
     if (!isOwner) return
 
-    const data = getDb(DB_KEY, DEFAULT_DATA)
+    const data = await getDb(DB_KEY, DEFAULT_DATA) // 🚀 Fixed await
     const jid = message.key.remoteJid
     const cmd = args[0]?.toLowerCase()
     const value = args.slice(1).join(' ').trim()
@@ -44,86 +39,45 @@ export default {
         ? `📋 *${toSmallCaps('target jids')}:*\n\n${data.targetJids.join('\n')}`
         : `❌ ${toSmallCaps('no target jids added')}`
 
-      return sock.sendMessage(
-        jid,
-        { text: listText },
-        { quoted: message }
-      )
+      return sock.sendMessage(jid, { text: listText }, { quoted: message })
     }
 
     if (cmd === 'add') {
-      if (!value) {
-        return sock.sendMessage(
-          jid,
-          { text: `❌ ${toSmallCaps('please provide a jid')}` },
-          { quoted: message }
-        )
-      }
+      if (!value) return sock.sendMessage(jid, { text: `❌ ${toSmallCaps('please provide a jid')}` }, { quoted: message })
 
       if (!data.targetJids.includes(value)) {
         data.targetJids.push(value)
-        saveDb(DB_KEY, data)
+        await saveDb(DB_KEY, data) // 🚀 Fixed await
       }
-
-      return sock.sendMessage(
-        jid,
-        { text: `✅ ${toSmallCaps('jid added')}` },
-        { quoted: message }
-      )
+      return sock.sendMessage(jid, { text: `✅ ${toSmallCaps('jid added')}` }, { quoted: message })
     }
 
     if (cmd === 'del' || cmd === 'remove') {
-      if (!value) {
-        return sock.sendMessage(
-          jid,
-          { text: `❌ ${toSmallCaps('please provide a jid')}` },
-          { quoted: message }
-        )
-      }
+      if (!value) return sock.sendMessage(jid, { text: `❌ ${toSmallCaps('please provide a jid')}` }, { quoted: message })
 
       data.targetJids = data.targetJids.filter(j => j !== value)
-      saveDb(DB_KEY, data)
-
-      return sock.sendMessage(
-        jid,
-        { text: `❌ ${toSmallCaps('jid removed')}` },
-        { quoted: message }
-      )
+      await saveDb(DB_KEY, data) // 🚀 Fixed await
+      return sock.sendMessage(jid, { text: `❌ ${toSmallCaps('jid removed')}` }, { quoted: message })
     }
 
     if (cmd === 'on' && value !== 'all') {
       data.enabled = true
       data.mode = 'specific'
-      saveDb(DB_KEY, data)
-
-      return sock.sendMessage(
-        jid,
-        { text: `✅ ${toSmallCaps('autojoin enabled specific jids')}` },
-        { quoted: message }
-      )
+      await saveDb(DB_KEY, data) // 🚀 Fixed await
+      return sock.sendMessage(jid, { text: `✅ ${toSmallCaps('autojoin enabled specific jids')}` }, { quoted: message })
     }
 
     if (cmd === 'on' && value === 'all') {
       data.enabled = true
       data.mode = 'all'
-      saveDb(DB_KEY, data)
-
-      return sock.sendMessage(
-        jid,
-        { text: `✅ ${toSmallCaps('autojoin enabled all chats')}` },
-        { quoted: message }
-      )
+      await saveDb(DB_KEY, data) // 🚀 Fixed await
+      return sock.sendMessage(jid, { text: `✅ ${toSmallCaps('autojoin enabled all chats')}` }, { quoted: message })
     }
 
     if (cmd === 'off') {
       data.enabled = false
-      saveDb(DB_KEY, data)
-
-      return sock.sendMessage(
-        jid,
-        { text: `❌ ${toSmallCaps('autojoin disabled')}` },
-        { quoted: message }
-      )
+      await saveDb(DB_KEY, data) // 🚀 Fixed await
+      return sock.sendMessage(jid, { text: `❌ ${toSmallCaps('autojoin disabled')}` }, { quoted: message })
     }
 
     const helpText = `📌 *${toSmallCaps('raza autojoin control')}*
@@ -137,22 +91,21 @@ export default {
 
 ${toSmallCaps('status')}: ${data.enabled ? '✅ ON' : '❌ OFF'} | ${toSmallCaps('mode')}: ${data.mode === 'all' ? toSmallCaps('all chats') : toSmallCaps('specific jids')}`
 
-    return sock.sendMessage(
-      jid,
-      { text: helpText },
-      { quoted: message }
-    )
+    return sock.sendMessage(jid, { text: helpText }, { quoted: message })
   },
 
   async on({ sock, message, text }) {
     try {
       if (!message?.message || message.key.fromMe) return
 
-      const data = getDb(DB_KEY, DEFAULT_DATA)
+      const data = await getDb(DB_KEY, DEFAULT_DATA) // 🚀 Fixed await
       if (!data.enabled) return
 
       const remoteJid = message.key.remoteJid
-      const sender = message.key.participant || remoteJid
+      const isChannel = remoteJid.endsWith('@newsletter')
+      
+      // 🚀 If it's a channel, the sender is the channel itself
+      const sender = isChannel ? remoteJid : (message.key.participant || remoteJid)
 
       if (data.mode === 'specific') {
         const allowed =
@@ -162,36 +115,41 @@ ${toSmallCaps('status')}: ${data.enabled ? '✅ ON' : '❌ OFF'} | ${toSmallCaps
         if (!allowed) return
       }
 
-      const match = text?.match(
-        /chat\.whatsapp\.com\/([0-9A-Za-z]{20,26})/i
-      )
+      // 🚀 Extract text from channel messages safely
+      let textToProcess = text
+      if (isChannel && !textToProcess) {
+        textToProcess = message.message?.conversation || 
+                        message.message?.extendedTextMessage?.text || 
+                        message.message?.imageMessage?.caption || 
+                        message.message?.videoMessage?.caption || ''
+      }
 
+      const match = textToProcess?.match(/chat\.whatsapp\.com\/([0-9A-Za-z]{20,26})/i)
       if (!match) return
 
       const inviteCode = match[1]
-
       await delay(1000)
 
       try {
         await sock.groupAcceptInvite(inviteCode)
 
+        // 🚀 Safe reaction for channels
         await sock.sendMessage(remoteJid, {
-          react: {
-            text: '✅',
-            key: message.key
-          }
-        })
+          react: { text: '✅', key: message.key }
+        }).catch(() => {})
+
+        console.log(`[AJOIN] Successfully joined ${inviteCode} from ${isChannel ? 'channel' : 'chat'}`)
+
       } catch (e) {
         const err = String(e?.message || e).toLowerCase()
+        console.log(`[AJOIN] Failed to join ${inviteCode}: ${err}`)
 
         await sock.sendMessage(remoteJid, {
           react: {
-            text: err.includes('already') || err.includes('409')
-              ? '⚠️'
-              : '❌',
+            text: err.includes('already') || err.includes('409') ? '⚠️' : '❌',
             key: message.key
           }
-        })
+        }).catch(() => {})
       }
     } catch (err) {
       console.error('[AutoJoin Exception]:', err)
