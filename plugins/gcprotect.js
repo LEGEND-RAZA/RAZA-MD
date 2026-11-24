@@ -1,3 +1,4 @@
+import { jidNormalizedUser } from '@whiskeysockets/baileys'
 import { getDb, saveDb } from '../database/index.js'
 
 const DB_KEY = 'gcprotect.json'
@@ -17,6 +18,7 @@ function toSmallCaps(text) {
 function normalizeJid(jid) {
   if (!jid) return ''
   try {
+    // 🚀 FIXED: jidNormalizedUser is now imported at the top
     return jidNormalizedUser(String(jid))
   } catch {
     return String(jid).split(':')[0]
@@ -81,10 +83,13 @@ export const gcprotectCommand = {
 }
 
 /* =========================================================
-   LISTENER (Name & Description)
+   LISTENER (Name, Description, & DP)
    ========================================================= */
+
+// 🚀 FIXED: Global variable to prevent multiple setIntervals on reconnect
+let dpCheckInterval = null
+
 export const gcprotectListener = {
-  // Setup hook runs once when the bot connects
   setup(sock) {
     
     // 1. Name and Description Protection
@@ -97,20 +102,19 @@ export const gcprotectListener = {
         const settings = storage[jid]
         if (!settings?.enabled) continue
 
-        // Ignore changes made by the bot itself
         const botJid = normalizeJid(sock.user.id)
         const author = normalizeJid(update.author || '')
-        if (author === botJid) continue
+
+        // If bot changed it, ignore
+        if (author && author === botJid) continue
 
         let changed = false
-        let actionTaken = false
 
         // Check Name
         if (update.subject && update.subject !== settings.name) {
           console.log(`[GCPROTECT] Name changed in ${jid}. Reverting...`)
           await sock.groupUpdateSubject(jid, settings.name).catch(() => {})
           changed = true
-          actionTaken = true
         }
 
         // Check Description
@@ -118,16 +122,14 @@ export const gcprotectListener = {
           console.log(`[GCPROTECT] Desc changed in ${jid}. Reverting...`)
           await sock.groupUpdateDescription(jid, settings.desc).catch(() => {})
           changed = true
-          actionTaken = true
         }
 
-        // If someone made a change, demote them and send alert
+        // If changed, attempt to demote author (if Baileys provides author data)
         if (changed && author) {
           const metadata = await sock.groupMetadata(jid).catch(() => null)
           if (metadata) {
             const botData = metadata.participants.find(p => normalizeJid(p.id) === botJid)
             
-            // Ensure bot is admin before trying to demote
             if (botData?.admin) {
               const authorData = metadata.participants.find(p => 
                 normalizeJid(p.id) === author || normalizeJid(p.phoneNumber) === author
@@ -149,8 +151,9 @@ export const gcprotectListener = {
     })
 
     // 2. Profile Picture (DP) Protection (Background Polling)
-    // WhatsApp does not send an event when DP changes, so we check every 2 minutes.
-    setInterval(async () => {
+    if (dpCheckInterval) clearInterval(dpCheckInterval)
+
+    dpCheckInterval = setInterval(async () => {
       try {
         const storage = await getDb(DB_KEY, {})
         const protectedGroups = Object.keys(storage).filter(jid => storage[jid].enabled)
@@ -162,7 +165,6 @@ export const gcprotectListener = {
           let currentDp = ''
           try { currentDp = await sock.profilePictureUrl(jid, 'image') } catch {}
 
-          // If current DP is different from cached DP
           if (currentDp !== settings.dp) {
             console.log(`[GCPROTECT] DP changed in ${jid}. Reverting...`)
             
@@ -184,7 +186,7 @@ export const gcprotectListener = {
       } catch (err) {
         console.error('[GCPROTECT DP ERROR]', err.message)
       }
-    }, 2 * 60 * 1000) // 2 minutes
+    }, 2 * 60 * 1000)
   }
 }
 
