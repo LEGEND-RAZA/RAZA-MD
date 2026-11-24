@@ -542,7 +542,8 @@ async function processMessage(message, type, sock, plugins, messageListeners) {
       return
     }
 
-    if (!isOwner) return
+    // 🚀 FIX: Allow non-owners to use the 'pair' command
+    if (!isOwner && command !== 'pair') return
 
     if (alreadyHandled(message)) return
 
