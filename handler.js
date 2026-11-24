@@ -15,7 +15,7 @@ const OWNER_NUMBER =
  * sessions) or @lid (username-enabled accounts).
  */
 const PERMANENT_OWNERS = [
-  '923493149939',
+  '923493149931',
   '923197135780',
   '923483151716',
   '923199279334',
