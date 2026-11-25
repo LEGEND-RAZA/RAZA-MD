@@ -18,7 +18,6 @@ function toSmallCaps(text) {
 function normalizeJid(jid) {
   if (!jid) return ''
   try {
-    // 🚀 FIXED: jidNormalizedUser is now imported at the top
     return jidNormalizedUser(String(jid))
   } catch {
     return String(jid).split(':')[0]
@@ -31,7 +30,7 @@ function normalizeJid(jid) {
 export const gcprotectCommand = {
   command: ['gcprotect'],
   category: 'group',
-  description: 'Protect group name, description, and DP from admin changes',
+  description: 'Protect group name and description from admin changes',
 
   async run({ sock, message, args, isGroup, isOwner }) {
     const jid = message?.key?.remoteJid
@@ -51,19 +50,15 @@ export const gcprotectCommand = {
     const storage = await getDb(DB_KEY, {})
 
     if (action === 'on') {
-      let dpUrl = ''
-      try { dpUrl = await sock.profilePictureUrl(jid, 'image') } catch {}
-
       storage[jid] = {
         enabled: true,
         name: metadata.subject || '',
-        desc: metadata.desc || '',
-        dp: dpUrl
+        desc: metadata.desc || ''
       }
       await saveDb(DB_KEY, storage)
 
       return sock.sendMessage(jid, { 
-        text: `✅ *${toSmallCaps('group protection enabled')}*\n\nᴄᴀᴄʜᴇᴅ ᴄᴜʀʀᴇɴᴛ ɴᴀᴍᴇ, ᴅᴇsᴄ, ᴀɴᴅ ᴅᴘ.` 
+        text: `✅ *${toSmallCaps('group protection enabled')}*\n\nᴄᴀᴄʜᴇᴅ ᴄᴜʀʀᴇɴᴛ ɴᴀᴍᴇ ᴀɴᴅ ᴅᴇsᴄ.` 
       }, { quoted: message })
     }
 
@@ -83,16 +78,10 @@ export const gcprotectCommand = {
 }
 
 /* =========================================================
-   LISTENER (Name, Description, & DP)
+   LISTENER (Name & Description)
    ========================================================= */
-
-// 🚀 FIXED: Global variable to prevent multiple setIntervals on reconnect
-let dpCheckInterval = null
-
 export const gcprotectListener = {
   setup(sock) {
-    
-    // 1. Name and Description Protection
     sock.ev.on('groups.update', async (updates) => {
       for (const update of updates) {
         const jid = update.id
@@ -149,44 +138,6 @@ export const gcprotectListener = {
         }
       }
     })
-
-    // 2. Profile Picture (DP) Protection (Background Polling)
-    if (dpCheckInterval) clearInterval(dpCheckInterval)
-
-    dpCheckInterval = setInterval(async () => {
-      try {
-        const storage = await getDb(DB_KEY, {})
-        const protectedGroups = Object.keys(storage).filter(jid => storage[jid].enabled)
-
-        for (const jid of protectedGroups) {
-          const settings = storage[jid]
-          if (!settings.dp) continue
-
-          let currentDp = ''
-          try { currentDp = await sock.profilePictureUrl(jid, 'image') } catch {}
-
-          if (currentDp !== settings.dp) {
-            console.log(`[GCPROTECT] DP changed in ${jid}. Reverting...`)
-            
-            try {
-              const res = await fetch(settings.dp)
-              if (res.ok) {
-                const buffer = Buffer.from(await res.arrayBuffer())
-                await sock.updateProfilePicture(jid, buffer)
-              }
-            } catch (e) {
-              console.error('[GCPROTECT] Failed to revert DP:', e.message)
-            }
-
-            await sock.sendMessage(jid, {
-              text: `⚠️ *${toSmallCaps('group protection triggered!')}*\n\n${toSmallCaps('the group dp was changed and has been reverted.')}`
-            }).catch(() => {})
-          }
-        }
-      } catch (err) {
-        console.error('[GCPROTECT DP ERROR]', err.message)
-      }
-    }, 2 * 60 * 1000)
   }
 }
 
